@@ -11,3 +11,8 @@ venv/
 .vscode/
 .test_tmp/
 data/*.db
+node_modules/
+dist/
+frontend/node_modules/
+frontend/dist/
+frontend/*.log
