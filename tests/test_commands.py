@@ -185,6 +185,22 @@ def test_confirm_and_release_seat_return_status_arrays() -> None:
     ]
 
 
+def test_force_confirm_seat_overrides_current_redis_state() -> None:
+    storage = StorageEngine()
+
+    assert handle_command(["FORCE_CONFIRM_SEAT", "concert", "A-1", "user-2"], storage) == [
+        1,
+        "CONFIRMED",
+        "user-2",
+        -1,
+    ]
+    assert handle_command(["SEAT_STATUS", "concert", "A-1"], storage) == [
+        "CONFIRMED",
+        "user-2",
+        -1,
+    ]
+
+
 def test_release_seat_returns_available_on_success() -> None:
     storage = StorageEngine()
     handle_command(["RESERVE_SEAT", "concert", "A-1", "user-1", "30"], storage)
@@ -224,6 +240,12 @@ def test_seat_commands_validate_arity() -> None:
         match="wrong number of arguments for 'CONFIRM_SEAT' command",
     ):
         handle_command(["CONFIRM_SEAT", "concert", "A-1"], storage)
+
+    with pytest.raises(
+        WrongNumberOfArgumentsError,
+        match="wrong number of arguments for 'FORCE_CONFIRM_SEAT' command",
+    ):
+        handle_command(["FORCE_CONFIRM_SEAT", "concert", "A-1"], storage)
 
     with pytest.raises(
         WrongNumberOfArgumentsError,

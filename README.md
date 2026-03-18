@@ -191,6 +191,12 @@ py -3.12 -m uvicorn ticketing_api.app:app --host 127.0.0.1 --port 8001
 py -3.12 -m uvicorn app_server.app:app --host 127.0.0.1 --port 8000
 ```
 
+Reconciler worker 실행:
+
+```bash
+py -3.12 -m scripts.reconciler --db-path data/ticketing.db --redis-host 127.0.0.1 --redis-port 6379 --interval-seconds 2
+```
+
 ## 테스트
 
 ```bash

@@ -303,6 +303,21 @@ def test_confirm_seat_is_idempotent_for_same_user() -> None:
     assert status == SeatStatus(SEAT_CONFIRMED, "user-1", -1)
 
 
+def test_force_confirm_seat_marks_any_state_as_confirmed_db_truth() -> None:
+    storage = StorageEngine()
+    storage.reserve_seat("concert", "A-1", "user-1", 30)
+
+    success, status = storage.force_confirm_seat("concert", "A-1", "user-2")
+
+    assert success is True
+    assert status == SeatStatus(SEAT_CONFIRMED, "user-2", -1)
+    assert storage.seat_status("concert", "A-1") == SeatStatus(
+        SEAT_CONFIRMED,
+        "user-2",
+        -1,
+    )
+
+
 def test_release_seat_returns_available_after_matching_hold() -> None:
     storage = StorageEngine()
     storage.reserve_seat("concert", "A-1", "user-1", 30)

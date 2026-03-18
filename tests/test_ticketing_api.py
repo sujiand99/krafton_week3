@@ -10,7 +10,9 @@ from ticketing_api.app import create_app
 from ticketing_api.database import SQLiteDatabase
 from ticketing_api.demo_layout import DEMO_EVENT_ID, DEMO_SEAT_COUNT
 from ticketing_api.repository import TicketingRepository
+from ticketing_api.schemas import HeldReservationCreate
 from ticketing_api.seed_demo import seed_demo_data
+from ticketing_api.service import TicketingService
 
 
 def make_db_path() -> Path:
@@ -424,5 +426,70 @@ def test_list_event_seats_marks_confirmed_seats_from_db_truth() -> None:
         seats = {seat["seat_id"]: seat for seat in response.json()}
         assert seats["B1"]["status"] == "CONFIRMED"
         assert seats["B2"]["status"] == "AVAILABLE"
+    finally:
+        cleanup_db_path(db_path)
+
+
+def test_service_lists_and_expires_stale_held_reservations() -> None:
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+    service = TicketingService(TicketingRepository(SQLiteDatabase(db_path)))
+    service.initialize()
+
+    try:
+        service.create_held_reservation(
+            HeldReservationCreate(
+                reservation_id="res-stale-1",
+                event_id="concert-seoul-2026",
+                seat_id="B2",
+                user_id="user-1",
+                hold_token="hold-stale-1",
+                expires_at="2020-01-01T00:00:00+00:00",
+            )
+        )
+
+        stale = service.list_stale_held_reservations(limit=10)
+        expired = service.expire_stale_reservations(limit=10)
+        reservation = service.list_user_reservations("user-1")[0]
+
+        assert [item["reservation_id"] for item in stale] == ["res-stale-1"]
+        assert [item["reservation_id"] for item in expired] == ["res-stale-1"]
+        assert reservation["status"] == "EXPIRED"
+    finally:
+        cleanup_db_path(db_path)
+
+
+def test_service_lists_confirmed_reservations_for_reconciliation() -> None:
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+
+    try:
+        with TestClient(create_app(db_path)) as client:
+            client.post(
+                "/reservations/held",
+                json={
+                    "reservation_id": "res-10",
+                    "event_id": "concert-seoul-2026",
+                    "seat_id": "B3",
+                    "user_id": "user-1",
+                    "hold_token": "hold-10",
+                    "expires_at": "2026-03-19T12:00:00Z",
+                },
+            )
+            client.post(
+                "/reservations/res-10/confirm",
+                json={
+                    "payment_id": "pay-10",
+                    "amount": 120000,
+                    "provider": "demo-pay",
+                    "provider_ref": "demo-pay-10",
+                },
+            )
+
+        service = TicketingService(TicketingRepository(SQLiteDatabase(db_path)))
+        confirmed = service.list_confirmed_reservations(limit=10)
+
+        assert confirmed[0]["reservation_id"] == "res-10"
+        assert confirmed[0]["seat_id"] == "B3"
     finally:
         cleanup_db_path(db_path)

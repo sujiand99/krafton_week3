@@ -591,6 +591,28 @@ def test_server_supports_ticketing_seat_flow() -> None:
         server_thread.join(timeout=2)
 
 
+def test_server_supports_force_confirm_repair_flow() -> None:
+    server = MiniRedisServer(port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert (
+                send_command(client, "FORCE_CONFIRM_SEAT", "concert", "A-2", "user-2")
+                == "*4\r\n:1\r\n$9\r\nCONFIRMED\r\n$6\r\nuser-2\r\n:-1\r\n"
+            )
+            assert (
+                send_command(client, "SEAT_STATUS", "concert", "A-2")
+                == "*3\r\n$9\r\nCONFIRMED\r\n$6\r\nuser-2\r\n:-1\r\n"
+            )
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
 def test_server_releases_hold_after_ticketing_seat_ttl_expires() -> None:
     clock = FakeClock()
     storage = StorageEngine(clock=clock)

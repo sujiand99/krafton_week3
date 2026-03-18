@@ -167,6 +167,27 @@ class TicketingService:
         self._require_event(event_id)
         return self._repository.list_confirmed_seats(event_id)
 
+    def list_confirmed_reservations(
+        self,
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
+        return self._repository.list_confirmed_reservations(limit)
+
+    def list_stale_held_reservations(self, limit: int = 100) -> list[dict[str, object]]:
+        return self._repository.list_stale_held_reservations(
+            now=current_timestamp(),
+            limit=limit,
+        )
+
+    def expire_stale_reservations(self, limit: int = 100) -> list[dict[str, object]]:
+        expired: list[dict[str, object]] = []
+        for reservation in self.list_stale_held_reservations(limit):
+            try:
+                expired.append(self.expire_reservation(reservation["reservation_id"]))
+            except ConflictError:
+                continue
+        return expired
+
     def _require_event(self, event_id: str) -> dict[str, object]:
         event = self._repository.get_event(event_id)
         if event is None:

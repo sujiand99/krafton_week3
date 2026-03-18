@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app_server.app import create_app
 from app_server.db_client import TicketingDBClient
-from app_server.redis_client import RedisRESPClient
+from app_server.redis_client import RedisRESPClient, SeatCommandResult, SeatStatus
 from server.server import MiniRedisServer
 from ticketing_api.app import create_app as create_db_app
 from ticketing_api.seed_demo import seed_demo_data
@@ -265,4 +265,86 @@ def test_app_server_exposes_queue_endpoints() -> None:
     finally:
         redis_server.shutdown()
         redis_thread.join(timeout=2)
+        db_path.unlink(missing_ok=True)
+
+
+def test_app_server_uses_force_confirm_after_db_commit() -> None:
+    class ForceOnlyRedis:
+        def __init__(self) -> None:
+            self._status = SeatStatus("AVAILABLE", None, -1)
+
+        def seat_status(self, event_id: str, seat_id: str) -> SeatStatus:
+            return self._status
+
+        def reserve_seat(
+            self,
+            event_id: str,
+            seat_id: str,
+            user_id: str,
+            hold_seconds: int,
+        ) -> SeatCommandResult:
+            self._status = SeatStatus("HELD", user_id, hold_seconds)
+            return SeatCommandResult(True, "HELD", user_id, hold_seconds)
+
+        def confirm_seat(self, event_id: str, seat_id: str, user_id: str) -> SeatCommandResult:
+            raise AssertionError("confirm_seat should not be used for DB-truth finalization")
+
+        def force_confirm_seat(
+            self,
+            event_id: str,
+            seat_id: str,
+            user_id: str,
+        ) -> SeatCommandResult:
+            self._status = SeatStatus("CONFIRMED", user_id, -1)
+            return SeatCommandResult(True, "CONFIRMED", user_id, -1)
+
+        def release_seat(self, event_id: str, seat_id: str, user_id: str) -> SeatCommandResult:
+            self._status = SeatStatus("AVAILABLE", None, -1)
+            return SeatCommandResult(True, "AVAILABLE", None, -1)
+
+        def join_queue(self, event_id: str, user_id: str) -> tuple[bool, int, int]:
+            raise NotImplementedError
+
+        def queue_position(self, event_id: str, user_id: str) -> tuple[int, int]:
+            raise NotImplementedError
+
+        def leave_queue(self, event_id: str, user_id: str) -> tuple[bool, int, int]:
+            raise NotImplementedError
+
+        def peek_queue(self, event_id: str) -> tuple[str | None, int]:
+            raise NotImplementedError
+
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+
+    try:
+        with TestClient(create_db_app(db_path)) as db_http:
+            app = create_app(
+                redis_client=ForceOnlyRedis(),
+                db_client=TicketingDBClient(http_client=db_http),
+            )
+            with TestClient(app) as client:
+                hold = client.post(
+                    "/reservations/hold",
+                    json={
+                        "event_id": "concert-seoul-2026",
+                        "seat_id": "A6",
+                        "user_id": "user-1",
+                        "hold_seconds": 45,
+                    },
+                )
+                reservation_id = hold.json()["reservation"]["reservation_id"]
+                confirm = client.post(
+                    f"/reservations/{reservation_id}/confirm",
+                    json={
+                        "event_id": "concert-seoul-2026",
+                        "seat_id": "A6",
+                        "user_id": "user-1",
+                    },
+                )
+
+        assert hold.status_code == 201
+        assert confirm.status_code == 200
+        assert confirm.json()["seat"]["status"] == "CONFIRMED"
+    finally:
         db_path.unlink(missing_ok=True)

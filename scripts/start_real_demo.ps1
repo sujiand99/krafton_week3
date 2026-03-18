@@ -54,6 +54,11 @@ Set-Location '$repoRoot'
 & '$python' -m uvicorn app_server.app:app --host 127.0.0.1 --port 8000
 "@
 
+$reconcilerCommand = @"
+Set-Location '$repoRoot'
+& '$python' -m scripts.reconciler --db-path data/ticketing.db --redis-host 127.0.0.1 --redis-port 6379 --interval-seconds 2
+"@
+
 $frontendCommand = @"
 `$env:Path = 'C:\Program Files\nodejs;' + `$env:Path
 Set-Location '$repoRoot\frontend'
@@ -66,9 +71,12 @@ Start-RealWindow -Title "Ticketing DB API" -Command $dbCommand
 Start-Sleep -Milliseconds 500
 Start-RealWindow -Title "Ticketing App Server" -Command $appCommand
 Start-Sleep -Milliseconds 500
+Start-RealWindow -Title "Ticketing Reconciler" -Command $reconcilerCommand
+Start-Sleep -Milliseconds 500
 Start-RealWindow -Title "Ticketing Frontend" -Command $frontendCommand -WorkingDirectory (Join-Path $repoRoot "frontend")
 
 Write-Host "Real demo services are starting..." -ForegroundColor Green
 Write-Host "Frontend: http://127.0.0.1:5173/ (or the next free Vite port if 5173 is busy)" -ForegroundColor Cyan
 Write-Host "App Server: http://127.0.0.1:8000" -ForegroundColor Cyan
 Write-Host "DB API: http://127.0.0.1:8001" -ForegroundColor Cyan
+Write-Host "Reconciler: python -m scripts.reconciler" -ForegroundColor Cyan

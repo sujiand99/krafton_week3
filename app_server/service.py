@@ -18,6 +18,7 @@ from app_server.redis_client import (
 )
 
 MOCK_PAYMENT_PROVIDER = "mock-pay"
+REDIS_CONFIRM_RETRY_ATTEMPTS = 3
 
 
 class RedisClientProtocol(Protocol):
@@ -32,6 +33,13 @@ class RedisClientProtocol(Protocol):
     ) -> SeatCommandResult: ...
 
     def confirm_seat(
+        self,
+        event_id: str,
+        seat_id: str,
+        user_id: str,
+    ) -> SeatCommandResult: ...
+
+    def force_confirm_seat(
         self,
         event_id: str,
         seat_id: str,
@@ -205,10 +213,8 @@ class TicketingOrchestratorService:
             },
         )
 
-        redis_result = self._redis.confirm_seat(event_id, seat_id, user_id)
-        if not redis_result.success and not (
-            redis_result.state == "CONFIRMED" and redis_result.user_id == user_id
-        ):
+        redis_result = self._finalize_confirmed_seat(event_id, seat_id, user_id)
+        if redis_result.state != "CONFIRMED" or redis_result.user_id != user_id:
             raise UpstreamError(
                 "DB confirmed the reservation but Redis could not finalize the seat"
             )
@@ -323,3 +329,31 @@ class TicketingOrchestratorService:
         except Exception:
             pass
         self._safe_release(event_id, seat_id, user_id)
+
+    def _finalize_confirmed_seat(
+        self,
+        event_id: str,
+        seat_id: str,
+        user_id: str,
+    ) -> SeatCommandResult:
+        last_error: Exception | None = None
+
+        for _ in range(REDIS_CONFIRM_RETRY_ATTEMPTS):
+            try:
+                result = self._redis.force_confirm_seat(event_id, seat_id, user_id)
+            except UpstreamError as exc:
+                last_error = exc
+                continue
+
+            if result.state == "CONFIRMED" and result.user_id == user_id:
+                return result
+
+            last_error = UpstreamError(
+                "Redis returned an unexpected seat state during confirmation finalization"
+            )
+
+        if last_error is None:
+            last_error = UpstreamError(
+                "Redis did not finalize the confirmed seat"
+            )
+        raise last_error

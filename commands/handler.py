@@ -56,6 +56,13 @@ class StorageProtocol(Protocol):
         user_id: str,
     ) -> tuple[bool, SeatStatusProtocol]: ...
 
+    def force_confirm_seat(
+        self,
+        event_id: str,
+        seat_id: str,
+        user_id: str,
+    ) -> tuple[bool, SeatStatusProtocol]: ...
+
     def release_seat(
         self,
         event_id: str,
@@ -184,6 +191,11 @@ def handle_command(command: list[str], storage: StorageProtocol) -> CommandResul
     if name == "CONFIRM_SEAT":
         event_id, seat_id, user_id = args
         success, status = storage.confirm_seat(event_id, seat_id, user_id)
+        return _seat_operation_result(success, status)
+
+    if name == "FORCE_CONFIRM_SEAT":
+        event_id, seat_id, user_id = args
+        success, status = storage.force_confirm_seat(event_id, seat_id, user_id)
         return _seat_operation_result(success, status)
 
     if name == "RELEASE_SEAT":

@@ -189,6 +189,18 @@ class RedisRESPClient:
         )
         return self._decode_seat_command(values)
 
+    def force_confirm_seat(
+        self,
+        event_id: str,
+        seat_id: str,
+        user_id: str,
+    ) -> SeatCommandResult:
+        values = self._expect_array(
+            self.execute("FORCE_CONFIRM_SEAT", event_id, seat_id, user_id),
+            4,
+        )
+        return self._decode_seat_command(values)
+
     def release_seat(
         self,
         event_id: str,

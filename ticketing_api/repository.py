@@ -167,6 +167,64 @@ class TicketingRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_confirmed_reservations(self, limit: int | None = None) -> list[dict[str, object]]:
+        query = """
+            SELECT
+                reservation_id,
+                event_id,
+                seat_id,
+                user_id,
+                status,
+                hold_token,
+                expires_at,
+                created_at,
+                updated_at,
+                confirmed_at,
+                cancelled_at
+            FROM reservations
+            WHERE status = 'CONFIRMED'
+            ORDER BY confirmed_at, reservation_id
+        """
+        params: tuple[object, ...] = ()
+        if limit is not None:
+            query += "\nLIMIT ?"
+            params = (limit,)
+
+        with closing(self._database.connect()) as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_stale_held_reservations(
+        self,
+        now: str,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        with closing(self._database.connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    reservation_id,
+                    event_id,
+                    seat_id,
+                    user_id,
+                    status,
+                    hold_token,
+                    expires_at,
+                    created_at,
+                    updated_at,
+                    confirmed_at,
+                    cancelled_at
+                FROM reservations
+                WHERE status = 'HELD'
+                  AND expires_at IS NOT NULL
+                  AND expires_at <= ?
+                ORDER BY expires_at, reservation_id
+                LIMIT ?
+                """,
+                (now, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_reservation(self, reservation_id: str) -> dict[str, object] | None:
         with closing(self._database.connect()) as conn:
             row = conn.execute(

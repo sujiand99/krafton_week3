@@ -179,6 +179,20 @@ class StorageEngine:
             )
             return True, SeatStatus(SEAT_CONFIRMED, user_id, -1)
 
+    def force_confirm_seat(
+        self,
+        event_id: str,
+        seat_id: str,
+        user_id: str,
+    ) -> tuple[bool, SeatStatus]:
+        with self._lock:
+            key = self._seat_key(event_id, seat_id)
+            self._store[key] = Entry(
+                value=self._serialize_seat_record(SEAT_CONFIRMED, user_id),
+                expires_at=None,
+            )
+            return True, SeatStatus(SEAT_CONFIRMED, user_id, -1)
+
     def release_seat(
         self,
         event_id: str,
