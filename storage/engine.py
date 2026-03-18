@@ -2,28 +2,41 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 import time
 from typing import Callable
 
-from storage.ttl import compute_deadline, is_expired, normalize_expire_option, should_apply_expiry
+from storage.ttl import (
+    compute_deadline,
+    is_expired,
+    normalize_expire_option,
+    should_apply_expiry,
+)
+
+
+@dataclass(slots=True)
+class Entry:
+    value: str
+    expires_at: float | None = None
 
 
 class StorageEngine:
-    """In-memory key-value storage."""
+    """In-memory key-value storage owned by the single command worker."""
 
     def __init__(self, clock: Callable[[], float] | None = None) -> None:
-        self._store: dict[str, str] = {}
-        self._expires_at: dict[str, float] = {}
+        self._store: dict[str, Entry] = {}
         self._clock = clock or time.monotonic
 
     def set(self, key: str, value: str) -> None:
-        self._store[key] = value
-        self._expires_at.pop(key, None)
+        self._store[key] = Entry(value=value)
 
     def get(self, key: str) -> str | None:
         self._purge_if_expired(key)
-        return self._store.get(key)
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        return entry.value
 
     def delete(self, key: str) -> bool:
         self._purge_if_expired(key)
@@ -39,10 +52,12 @@ class StorageEngine:
 
         if self._purge_if_expired(key, now=now):
             return False
-        if key not in self._store:
+
+        entry = self._store.get(key)
+        if entry is None:
             return False
 
-        current_deadline = self._expires_at.get(key)
+        current_deadline = entry.expires_at
         new_deadline = compute_deadline(now, seconds)
         if not should_apply_expiry(option, current_deadline, new_deadline):
             return False
@@ -51,29 +66,29 @@ class StorageEngine:
             self._delete_key(key)
             return True
 
-        self._expires_at[key] = new_deadline
+        entry.expires_at = new_deadline
         return True
 
     def ttl(self, key: str) -> int:
         now = self._clock()
         if self._purge_if_expired(key, now=now):
             return -2
-        if key not in self._store:
-            return -2
 
-        deadline = self._expires_at.get(key)
-        if deadline is None:
+        entry = self._store.get(key)
+        if entry is None:
+            return -2
+        if entry.expires_at is None:
             return -1
 
-        return max(0, math.ceil(deadline - now))
+        return max(0, math.ceil(entry.expires_at - now))
 
     def _purge_if_expired(self, key: str, now: float | None = None) -> bool:
-        deadline = self._expires_at.get(key)
-        if deadline is None:
+        entry = self._store.get(key)
+        if entry is None or entry.expires_at is None:
             return False
 
         current_time = self._clock() if now is None else now
-        if not is_expired(deadline, current_time):
+        if not is_expired(entry.expires_at, current_time):
             return False
 
         self._delete_key(key)
@@ -81,4 +96,3 @@ class StorageEngine:
 
     def _delete_key(self, key: str) -> None:
         self._store.pop(key, None)
-        self._expires_at.pop(key, None)

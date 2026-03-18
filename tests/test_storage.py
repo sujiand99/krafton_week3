@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from storage.engine import StorageEngine
+from storage.engine import Entry, StorageEngine
 
 
 class FakeClock:
@@ -24,6 +24,14 @@ def test_set_then_get_returns_value() -> None:
     assert storage.get("a") == "1"
 
 
+def test_storage_uses_entry_objects_for_values_and_ttl_metadata() -> None:
+    storage = StorageEngine()
+
+    storage.set("a", "1")
+
+    assert storage._store["a"] == Entry(value="1", expires_at=None)
+
+
 def test_set_overwrites_existing_value_and_clears_existing_ttl() -> None:
     clock = FakeClock()
     storage = StorageEngine(clock=clock)
@@ -36,6 +44,7 @@ def test_set_overwrites_existing_value_and_clears_existing_ttl() -> None:
     clock.advance(10)
 
     assert storage.get("a") == "2"
+    assert storage._store["a"] == Entry(value="2", expires_at=None)
 
 
 def test_delete_existing_key_returns_true_and_removes_value_and_ttl() -> None:

@@ -22,6 +22,7 @@ from protocol.resp_encoder import (
     encode_simple_string,
 )
 from protocol.resp_parser import IncompleteRESPError, ProtocolError, parse_resp_frame
+from server.executor import SerialCommandExecutor
 from storage.engine import StorageEngine
 
 HOST = "127.0.0.1"
@@ -88,52 +89,65 @@ def handle_client(
     addr: tuple[str, int],
     storage: StorageEngine,
     stop_event: threading.Event | None = None,
+    executor: SerialCommandExecutor | None = None,
 ) -> None:
     """Receive raw bytes, parse RESP commands, and send RESP responses."""
     print(f"[connected] {addr[0]}:{addr[1]}")
     buffer = b""
+    owns_executor = executor is None
+    command_executor = executor or SerialCommandExecutor(
+        storage=storage,
+        command_handler=handle_command,
+    )
 
-    with conn:
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                print(f"[stopped] {addr[0]}:{addr[1]}")
-                return
+    if owns_executor:
+        command_executor.start()
 
-            try:
-                data = conn.recv(BUFFER_SIZE)
-            except ConnectionResetError:
-                print(f"[reset] {addr[0]}:{addr[1]}")
-                return
-            except OSError:
-                print(f"[socket-error] {addr[0]}:{addr[1]}")
-                return
+    try:
+        with conn:
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    print(f"[stopped] {addr[0]}:{addr[1]}")
+                    return
 
-            if not data:
-                print(f"[disconnected] {addr[0]}:{addr[1]}")
-                return
-
-            print(f"[received] {addr[0]}:{addr[1]} -> {data!r}")
-            buffer += data
-
-            while buffer:
                 try:
-                    command, consumed = parse_resp_frame(buffer)
-                except IncompleteRESPError:
-                    break
-                except ProtocolError as exc:
-                    response = encode_error(_format_error_message(exc))
+                    data = conn.recv(BUFFER_SIZE)
+                except ConnectionResetError:
+                    print(f"[reset] {addr[0]}:{addr[1]}")
+                    return
+                except OSError:
+                    print(f"[socket-error] {addr[0]}:{addr[1]}")
+                    return
+
+                if not data:
+                    print(f"[disconnected] {addr[0]}:{addr[1]}")
+                    return
+
+                print(f"[received] {addr[0]}:{addr[1]} -> {data!r}")
+                buffer += data
+
+                while buffer:
+                    try:
+                        command, consumed = parse_resp_frame(buffer)
+                    except IncompleteRESPError:
+                        break
+                    except ProtocolError as exc:
+                        response = encode_error(_format_error_message(exc))
+                        send_response(conn, addr, response)
+                        buffer = b""
+                        break
+
+                    try:
+                        result = command_executor.execute(command)
+                        response = encode_command_result(command, result)
+                    except Exception as exc:
+                        response = encode_error(_format_error_message(exc))
+
                     send_response(conn, addr, response)
-                    buffer = b""
-                    break
-
-                try:
-                    result = handle_command(command, storage)
-                    response = encode_command_result(command, result)
-                except Exception as exc:
-                    response = encode_error(_format_error_message(exc))
-
-                send_response(conn, addr, response)
-                buffer = buffer[consumed:]
+                    buffer = buffer[consumed:]
+    finally:
+        if owns_executor:
+            command_executor.stop()
 
 
 class MiniRedisServer:
@@ -146,6 +160,10 @@ class MiniRedisServer:
         self._host = host
         self._port = port
         self._storage = storage or StorageEngine()
+        self._executor = SerialCommandExecutor(
+            storage=self._storage,
+            command_handler=handle_command,
+        )
         self._shutdown_event = threading.Event()
         self._started_event = threading.Event()
         self._server_socket: socket.socket | None = None
@@ -158,6 +176,7 @@ class MiniRedisServer:
         return self._bound_address
 
     def serve_forever(self) -> None:
+        self._executor.start()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_socket.bind((self._host, self._port))
@@ -193,6 +212,7 @@ class MiniRedisServer:
                 self._server_socket = None
                 self._started_event.set()
                 self._join_client_threads()
+                self._executor.stop()
 
     def wait_until_started(self, timeout: float = 2.0) -> tuple[str, int]:
         if not self._started_event.wait(timeout):
@@ -214,6 +234,7 @@ class MiniRedisServer:
                 client_address,
                 self._storage,
                 stop_event=self._shutdown_event,
+                executor=self._executor,
             )
         finally:
             current_thread = threading.current_thread()

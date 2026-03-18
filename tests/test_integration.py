@@ -51,6 +51,58 @@ class FakeClock:
         self._now += seconds
 
 
+class TrackingStorage(StorageEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self._tracking_lock = threading.Lock()
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    def set(self, key: str, value: str) -> None:
+        self._enter_operation()
+        try:
+            super().set(key, value)
+        finally:
+            self._exit_operation()
+
+    def get(self, key: str) -> str | None:
+        self._enter_operation()
+        try:
+            return super().get(key)
+        finally:
+            self._exit_operation()
+
+    def delete(self, key: str) -> bool:
+        self._enter_operation()
+        try:
+            return super().delete(key)
+        finally:
+            self._exit_operation()
+
+    def expire(self, key: str, seconds: int, option: str | None = None) -> bool:
+        self._enter_operation()
+        try:
+            return super().expire(key, seconds, option)
+        finally:
+            self._exit_operation()
+
+    def ttl(self, key: str) -> int:
+        self._enter_operation()
+        try:
+            return super().ttl(key)
+        finally:
+            self._exit_operation()
+
+    def _enter_operation(self) -> None:
+        with self._tracking_lock:
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+
+    def _exit_operation(self) -> None:
+        with self._tracking_lock:
+            self.active_calls -= 1
+
+
 def encode_command(*tokens: str) -> bytes:
     parts = [f"*{len(tokens)}\r\n".encode("utf-8")]
     for token in tokens:
@@ -368,6 +420,48 @@ def test_server_returns_errors_without_dropping_valid_connection_flow() -> None:
 
             client.sendall(b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n2\r\n")
             assert client.recv(1024).decode("utf-8") == "+OK\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_serializes_commands_from_multiple_clients() -> None:
+    storage = TrackingStorage()
+    server = MiniRedisServer(port=0, storage=storage)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+    barrier = threading.Barrier(4)
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def client_session(client_id: int) -> None:
+        key = f"client-{client_id}"
+        value = f"value-{client_id}"
+
+        try:
+            barrier.wait(timeout=1)
+            with socket.create_connection((host, port), timeout=2) as client:
+                assert send_command(client, "SET", key, value) == "+OK\r\n"
+                assert send_command(client, "GET", key) == f"${len(value)}\r\n{value}\r\n"
+                assert send_command(client, "DEL", key) == ":1\r\n"
+        except BaseException as exc:
+            with errors_lock:
+                errors.append(exc)
+
+    clients = [threading.Thread(target=client_session, args=(index,)) for index in range(4)]
+
+    try:
+        for client in clients:
+            client.start()
+
+        for client in clients:
+            client.join(timeout=3)
+            assert not client.is_alive()
+
+        assert not errors
+        assert storage.max_active_calls == 1
     finally:
         server.shutdown()
         server_thread.join(timeout=2)
