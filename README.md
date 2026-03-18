@@ -270,6 +270,109 @@ mini-redis/
 
 또한 동시성 문제를 줄이기 위해 single worker 기반 직렬 실행 구조를 사용하여, 여러 요청이 들어와도 실제 명령 실행은 순차적으로 처리되도록 설계했습니다.
 
+### 아키텍처 다이어그램
+
+```mermaid
+flowchart LR
+    U["User"] --> F["Frontend"]
+    F --> A["Ticketing App Server"]
+    A --> R["Mini Redis"]
+    A --> D["Ticketing DB API"]
+    A --> P["Mock Payment"]
+    R --> E["SerialCommandExecutor"]
+    E --> S["StorageEngine"]
+    S -. optional snapshot .-> Q["SQLiteSnapshotStore"]
+    C["Ticketing Reconciler"] --> R
+    C --> D
+```
+
+이 구조에서 Frontend는 App Server만 바라보고, App Server가 Redis와 DB를 오케스트레이션합니다. Mini Redis 내부에서는 `SerialCommandExecutor`가 실제 명령 실행을 직렬화하고, `StorageEngine`이 key-value, TTL, seat, queue 상태를 관리합니다.
+
+### 예약/결제 시퀀스
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant F as Frontend
+    participant A as App Server
+    participant R as Mini Redis
+    participant D as DB API
+    participant P as Mock Payment
+
+    U->>F: 좌석 클릭
+    F->>A: POST /reservations/hold
+    A->>R: RESERVE_SEAT(event, seat, user, ttl)
+    R-->>A: success / fail
+    alt hold success
+        A->>D: create held reservation
+        D-->>A: reservation_id
+        A-->>F: HELD + ttl
+    else hold fail
+        A-->>F: already held or confirmed
+    end
+
+    U->>F: 결제/확정 클릭
+    F->>A: POST /reservations/{id}/confirm
+    A->>P: payment approve
+    P-->>A: success
+    A->>D: confirm reservation
+    D-->>A: CONFIRMED
+    A->>R: CONFIRM_SEAT(event, seat, user)
+    R-->>A: success
+    A-->>F: purchase success
+```
+
+### Reconciler 보정 흐름
+
+```mermaid
+sequenceDiagram
+    participant R as Mini Redis
+    participant C as Ticketing Reconciler
+    participant D as Ticketing Service DB
+
+    loop periodic reconciliation
+        C->>D: expire stale HELD reservations
+        D-->>C: expired held reservations
+        C->>R: seat status
+        R-->>C: held by user or available
+        alt still held by same user
+            C->>R: RELEASE_SEAT
+            R-->>C: AVAILABLE
+        end
+    end
+
+    loop periodic reconciliation
+        C->>D: list confirmed reservations
+        D-->>C: confirmed rows
+        C->>R: seat status
+        R-->>C: available or wrong state
+        C->>R: FORCE_CONFIRM_SEAT
+        R-->>C: CONFIRMED
+    end
+```
+
+이 보정 흐름 덕분에 TTL 만료로 사라진 `HELD` 상태나, 장애로 인해 Redis가 `CONFIRMED` 상태를 잃어버린 경우에도 DB 기준으로 다시 상태를 맞출 수 있습니다.
+
+### 데이터 저장 예시
+
+Redis에는 빠르게 변하는 seat/queue 상태가 저장됩니다.
+
+- `seat:concert-seoul-2026:A7 -> {"state":"CONFIRMED","user_id":"user-3"}`
+- `seat:concert-seoul-2026:A12 -> {"state":"HELD","user_id":"user-2"}`
+- `queue:concert-seoul-2026 -> ["user-2","user-3","user-1"]`
+
+DB에는 최종 예약 이력이 남습니다. 대표 필드는 다음과 같습니다.
+
+- `seat_id`
+- `user_id`
+- `status`
+- `hold_token`
+- `expires_at`
+- `created_at`
+- `updated_at`
+
+즉 Redis는 현재 seat/queue 상태를 빠르게 관리하고, DB는 예약 이력과 상태 전이를 영속적으로 보관합니다.
+
 ### 구현 기능
 
 기본 Redis 기능:
