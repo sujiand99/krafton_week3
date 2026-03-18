@@ -40,6 +40,7 @@ def create_app(
     db_base_url: str = "http://127.0.0.1:8001",
 ) -> FastAPI:
     owns_db_client = db_client is None
+    owns_redis_client = redis_client is None
 
     redis_gateway = redis_client or RedisRESPClient(host=redis_host, port=redis_port)
     db_gateway = db_client or TicketingDBClient(base_url=db_base_url)
@@ -51,6 +52,8 @@ def create_app(
         try:
             yield
         finally:
+            if owns_redis_client:
+                redis_gateway.close()
             if owns_db_client:
                 db_gateway.close()
 

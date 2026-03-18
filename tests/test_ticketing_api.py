@@ -426,3 +426,64 @@ def test_list_event_seats_marks_confirmed_seats_from_db_truth() -> None:
         assert seats["B2"]["status"] == "AVAILABLE"
     finally:
         cleanup_db_path(db_path)
+
+def test_stale_held_reservation_is_marked_expired_on_read() -> None:
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+
+    try:
+        with TestClient(create_app(db_path)) as client:
+            client.post(
+                "/reservations/held",
+                json={
+                    "reservation_id": "res-expired-1",
+                    "event_id": "concert-seoul-2026",
+                    "seat_id": "A9",
+                    "user_id": "user-1",
+                    "hold_token": "hold-expired-1",
+                    "expires_at": "2020-01-01T00:00:00Z",
+                },
+            )
+            reservations = client.get("/users/user-1/reservations")
+            seats = client.get("/events/concert-seoul-2026/seats")
+
+        assert reservations.status_code == 200
+        assert reservations.json()[0]["status"] == "EXPIRED"
+        assert seats.status_code == 200
+        seat_map = {seat["seat_id"]: seat for seat in seats.json()}
+        assert seat_map["A9"]["status"] == "AVAILABLE"
+    finally:
+        cleanup_db_path(db_path)
+
+
+def test_stale_held_reservation_cannot_be_confirmed() -> None:
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+
+    try:
+        with TestClient(create_app(db_path)) as client:
+            client.post(
+                "/reservations/held",
+                json={
+                    "reservation_id": "res-expired-2",
+                    "event_id": "concert-seoul-2026",
+                    "seat_id": "A10",
+                    "user_id": "user-2",
+                    "hold_token": "hold-expired-2",
+                    "expires_at": "2020-01-01T00:00:00Z",
+                },
+            )
+            response = client.post(
+                "/reservations/res-expired-2/confirm",
+                json={
+                    "payment_id": "pay-expired-2",
+                    "amount": 120000,
+                    "provider": "demo-pay",
+                    "provider_ref": "demo-pay-expired-2",
+                },
+            )
+
+        assert response.status_code == 409
+        assert "EXPIRED" in response.json()["detail"]
+    finally:
+        cleanup_db_path(db_path)

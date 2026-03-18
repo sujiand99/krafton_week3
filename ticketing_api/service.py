@@ -1,4 +1,4 @@
-"""Service layer for the ticketing DB API."""
+﻿"""Service layer for the ticketing DB API."""
 
 from __future__ import annotations
 
@@ -51,6 +51,7 @@ class TicketingService:
         return self._repository.list_events()
 
     def list_event_seats(self, event_id: str) -> list[dict[str, object]]:
+        self._expire_stale_reservations()
         self._require_event(event_id)
         return self._repository.list_seats(event_id)
 
@@ -58,6 +59,7 @@ class TicketingService:
         self,
         request: HeldReservationCreate,
     ) -> tuple[dict[str, object], bool]:
+        self._expire_stale_reservations()
         self._require_event(request.event_id)
         self._require_seat(request.event_id, request.seat_id)
         self._ensure_user(request.user_id)
@@ -160,12 +162,17 @@ class TicketingService:
         )
 
     def list_user_reservations(self, user_id: str) -> list[dict[str, object]]:
+        self._expire_stale_reservations()
         self._require_user(user_id)
         return self._repository.list_user_reservations(user_id)
 
     def list_confirmed_seats(self, event_id: str) -> list[dict[str, object]]:
+        self._expire_stale_reservations()
         self._require_event(event_id)
         return self._repository.list_confirmed_seats(event_id)
+
+    def _expire_stale_reservations(self) -> None:
+        self._repository.expire_stale_reservations(current_timestamp())
 
     def _require_event(self, event_id: str) -> dict[str, object]:
         event = self._repository.get_event(event_id)
@@ -206,6 +213,7 @@ class TicketingService:
         return seat
 
     def _require_reservation(self, reservation_id: str) -> dict[str, object]:
+        self._expire_stale_reservations()
         reservation = self._repository.get_reservation(reservation_id)
         if reservation is None:
             raise NotFoundError(f"reservation '{reservation_id}' was not found")
