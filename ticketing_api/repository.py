@@ -6,6 +6,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 
 from ticketing_api.database import SQLiteDatabase
+from ticketing_api.demo_layout import DEMO_EVENT_ID, build_demo_seat_rows
 
 
 def utc_now_iso() -> str:
@@ -351,7 +352,7 @@ class TicketingRepository:
         created_at = utc_now_iso()
         event_rows = [
             (
-                "concert-seoul-2026",
+                DEMO_EVENT_ID,
                 "Open Air Countdown Live",
                 "Seoul Olympic Hall",
                 "2026-03-19T20:00:00+09:00",
@@ -364,22 +365,7 @@ class TicketingRepository:
             ("user-2", "Jisoo", "jisoo@example.com", created_at),
             ("user-3", "Alex", "alex@example.com", created_at),
         ]
-        seat_rows: list[tuple[object, ...]] = []
-        for row_label in ("A", "B"):
-            for seat_number in range(1, 9):
-                seat_id = f"{row_label}{seat_number}"
-                seat_rows.append(
-                    (
-                        "concert-seoul-2026",
-                        seat_id,
-                        seat_id,
-                        "FLOOR",
-                        row_label,
-                        seat_number,
-                        120000,
-                        created_at,
-                    )
-                )
+        seat_rows = build_demo_seat_rows(created_at)
 
         with closing(self._database.connect()) as conn:
             conn.executemany(

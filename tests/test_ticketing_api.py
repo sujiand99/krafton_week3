@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from ticketing_api.app import create_app
 from ticketing_api.database import SQLiteDatabase
+from ticketing_api.demo_layout import DEMO_EVENT_ID, DEMO_SEAT_COUNT
 from ticketing_api.repository import TicketingRepository
 from ticketing_api.seed_demo import seed_demo_data
 
@@ -55,10 +56,10 @@ def test_seed_demo_data_populates_events_and_seats() -> None:
         repository = TicketingRepository(SQLiteDatabase(db_path))
 
         events = repository.list_events()
-        seats = repository.list_seats("concert-seoul-2026")
+        seats = repository.list_seats(DEMO_EVENT_ID)
 
         assert len(events) == 1
-        assert len(seats) == 16
+        assert len(seats) == DEMO_SEAT_COUNT
         assert seats[0]["status"] == "AVAILABLE"
     finally:
         cleanup_db_path(db_path)

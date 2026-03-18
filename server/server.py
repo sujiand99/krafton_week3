@@ -29,7 +29,7 @@ from storage.sqlite_store import SQLiteSnapshotStore
 
 HOST = "127.0.0.1"
 PORT = 6379
-BACKLOG = 5
+BACKLOG = 256
 BUFFER_SIZE = 4096
 SIMPLE_STRING_COMMANDS = {"SET"}
 DEFAULT_DB_PATH: Path | None = None
