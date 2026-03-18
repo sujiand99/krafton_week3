@@ -6,11 +6,11 @@ export const DEFAULT_HOLD_SECONDS = Number(
 export const POLL_INTERVAL_MS = Number(
   import.meta.env.VITE_POLL_INTERVAL_MS ?? 1000,
 );
-export const SEAT_ROWS = Array.from({ length: 10 }, (_, index) =>
+export const SEAT_ROWS = Array.from({ length: 6 }, (_, index) =>
   String.fromCharCode(65 + index),
 );
-export const SEATS_PER_ROW = 20;
-export const BURST_REQUEST_MULTIPLIER = 50;
+export const SEATS_PER_ROW = 11;
+export const BURST_REQUEST_MULTIPLIER = 30;
 export const SEAT_COUNT = SEAT_ROWS.length * SEATS_PER_ROW;
 export const TOTAL_BURST_REQUESTS = SEAT_COUNT * BURST_REQUEST_MULTIPLIER;
 

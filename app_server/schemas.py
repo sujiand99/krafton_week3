@@ -119,3 +119,15 @@ class PurchaseReservationResponse(StrictModel):
     seat: SeatViewResponse
     payment: MockPaymentResponse
     created: bool
+
+
+class OrchestrationLogEntryResponse(StrictModel):
+    timestamp: datetime
+    source: str
+    target: str
+    action: str
+    status: str
+    event_id: str | None = None
+    seat_id: str | None = None
+    user_id: str | None = None
+    detail: str | None = None

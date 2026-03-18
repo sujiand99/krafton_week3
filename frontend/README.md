@@ -11,7 +11,7 @@ What it shows clearly:
 - newest-first live log feed
 - scripted multi-user simulation
 - a `10 x 20` seat map (`200` seats total)
-- a crowd burst mode with `10,000` reserve attempts (`50` contenders per seat)
+- a crowd burst mode with `1,980` reserve attempts (`30` contenders per seat)
 
 ## Structure
 
@@ -118,7 +118,7 @@ Still marked with `TODO`:
 
 ## High-Contention Backend Test
 
-This repo also includes a Redis contention test for `200` seats and `10,000` total
+This repo also includes a Redis contention test for `66` seats and `1,980` total
 seat-hold attempts (`50` contenders per seat):
 
 ```bash

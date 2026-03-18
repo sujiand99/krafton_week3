@@ -464,9 +464,17 @@ class TicketingRepository:
         seat_rows = build_demo_seat_rows(created_at)
 
         with closing(self._database.connect()) as conn:
+            # Reset the demo event so the current seat layout matches the latest constants.
+            conn.execute(
+                """
+                DELETE FROM events
+                WHERE event_id = ?
+                """,
+                (DEMO_EVENT_ID,),
+            )
             conn.executemany(
                 """
-                INSERT OR IGNORE INTO events (
+                INSERT INTO events (
                     event_id,
                     title,
                     venue,
@@ -490,7 +498,7 @@ class TicketingRepository:
             )
             conn.executemany(
                 """
-                INSERT OR IGNORE INTO seats (
+                INSERT INTO seats (
                     event_id,
                     seat_id,
                     seat_label,

@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from app_server.exceptions import ConflictError, NotFoundError, UpstreamError
+from app_server.orchestration_log import OrchestrationLogStore
 from app_server.redis_client import (
     QueueFrontResult,
     QueueJoinResult,
@@ -97,10 +98,18 @@ class TicketingOrchestratorService:
         redis_client: RedisClientProtocol,
         db_client: DBClientProtocol,
         now_provider: Callable[[], datetime] | None = None,
+        orchestration_log: OrchestrationLogStore | None = None,
     ) -> None:
         self._redis = redis_client
         self._db = db_client
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
+        self._orchestration_log = orchestration_log or OrchestrationLogStore()
+
+    def list_orchestration_logs(self, limit: int = 40) -> list[dict[str, object]]:
+        return self._orchestration_log.list_entries(limit)
+
+    def clear_orchestration_logs(self) -> None:
+        self._orchestration_log.clear()
 
     def list_events(self) -> list[dict[str, object]]:
         return self._db.list_events()
@@ -157,9 +166,38 @@ class TicketingOrchestratorService:
         hold_seconds: int,
     ) -> tuple[dict[str, object], bool]:
         self._find_event_seat(event_id, seat_id)
+        self._trace(
+            source="APP",
+            target="REDIS",
+            action="RESERVE_SEAT",
+            status="START",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+        )
         reserve_result = self._redis.reserve_seat(event_id, seat_id, user_id, hold_seconds)
         if not reserve_result.success:
+            self._trace(
+                source="APP",
+                target="REDIS",
+                action="RESERVE_SEAT",
+                status="FAIL",
+                event_id=event_id,
+                seat_id=seat_id,
+                user_id=user_id,
+                detail=self._seat_conflict_message(reserve_result, user_id),
+            )
             raise ConflictError(self._seat_conflict_message(reserve_result, user_id))
+        self._trace(
+            source="APP",
+            target="REDIS",
+            action="RESERVE_SEAT",
+            status="SUCCESS",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=f"ttl={reserve_result.ttl}",
+        )
 
         reservation_id = f"res-{uuid4().hex}"
         hold_token = f"hold-{uuid4().hex}"
@@ -174,10 +212,40 @@ class TicketingOrchestratorService:
         }
 
         try:
+            self._trace(
+                source="APP",
+                target="DB",
+                action="CREATE_HELD",
+                status="START",
+                event_id=event_id,
+                seat_id=seat_id,
+                user_id=user_id,
+                detail=reservation_id,
+            )
             reservation, created = self._db.create_held_reservation(payload)
         except Exception:
+            self._trace(
+                source="APP",
+                target="DB",
+                action="CREATE_HELD",
+                status="FAIL",
+                event_id=event_id,
+                seat_id=seat_id,
+                user_id=user_id,
+                detail=reservation_id,
+            )
             self._safe_release(event_id, seat_id, user_id)
             raise
+        self._trace(
+            source="APP",
+            target="DB",
+            action="CREATE_HELD",
+            status="SUCCESS",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=reservation["reservation_id"],
+        )
 
         return {
             "reservation": reservation,
@@ -193,7 +261,26 @@ class TicketingOrchestratorService:
         user_id: str,
     ) -> dict[str, object]:
         seat = self._find_event_seat(event_id, seat_id)
+        self._trace(
+            source="APP",
+            target="REDIS",
+            action="SEAT_STATUS",
+            status="START",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+        )
         status = self._redis.seat_status(event_id, seat_id)
+        self._trace(
+            source="APP",
+            target="REDIS",
+            action="SEAT_STATUS",
+            status="SUCCESS",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=f"state={status.state}",
+        )
         if status.state == "AVAILABLE":
             self._safe_expire(reservation_id)
             raise ConflictError("seat hold has already expired")
@@ -203,6 +290,26 @@ class TicketingOrchestratorService:
             raise ConflictError(f"seat cannot be confirmed from state {status.state}")
 
         payment = self._build_mock_payment(int(seat["price"]))
+        self._trace(
+            source="APP",
+            target="PAYMENT",
+            action="MOCK_APPROVE",
+            status="SUCCESS",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=payment["payment_id"],
+        )
+        self._trace(
+            source="APP",
+            target="DB",
+            action="CONFIRM_RESERVATION",
+            status="START",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=reservation_id,
+        )
         reservation = self._db.confirm_reservation(
             reservation_id,
             {
@@ -211,6 +318,16 @@ class TicketingOrchestratorService:
                 "provider": payment["provider"],
                 "provider_ref": payment["provider_ref"],
             },
+        )
+        self._trace(
+            source="APP",
+            target="DB",
+            action="CONFIRM_RESERVATION",
+            status="SUCCESS",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=reservation_id,
         )
 
         redis_result = self._finalize_confirmed_seat(event_id, seat_id, user_id)
@@ -232,7 +349,27 @@ class TicketingOrchestratorService:
         seat_id: str,
         user_id: str,
     ) -> dict[str, object]:
+        self._trace(
+            source="APP",
+            target="DB",
+            action="CANCEL_RESERVATION",
+            status="START",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=reservation_id,
+        )
         reservation = self._db.cancel_reservation(reservation_id, {})
+        self._trace(
+            source="APP",
+            target="DB",
+            action="CANCEL_RESERVATION",
+            status="SUCCESS",
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=reservation_id,
+        )
         self._safe_release(event_id, seat_id, user_id)
         return {
             "reservation": reservation,
@@ -311,16 +448,75 @@ class TicketingOrchestratorService:
 
     def _safe_release(self, event_id: str, seat_id: str, user_id: str) -> None:
         try:
+            self._trace(
+                source="APP",
+                target="REDIS",
+                action="RELEASE_SEAT",
+                status="START",
+                event_id=event_id,
+                seat_id=seat_id,
+                user_id=user_id,
+            )
             status = self._redis.seat_status(event_id, seat_id)
             if status.state == "HELD" and status.user_id == user_id:
                 self._redis.release_seat(event_id, seat_id, user_id)
+                self._trace(
+                    source="APP",
+                    target="REDIS",
+                    action="RELEASE_SEAT",
+                    status="SUCCESS",
+                    event_id=event_id,
+                    seat_id=seat_id,
+                    user_id=user_id,
+                )
+                return
+            self._trace(
+                source="APP",
+                target="REDIS",
+                action="RELEASE_SEAT",
+                status="SKIP",
+                event_id=event_id,
+                seat_id=seat_id,
+                user_id=user_id,
+                detail=f"state={status.state}",
+            )
         except Exception:
+            self._trace(
+                source="APP",
+                target="REDIS",
+                action="RELEASE_SEAT",
+                status="FAIL",
+                event_id=event_id,
+                seat_id=seat_id,
+                user_id=user_id,
+            )
             return
 
     def _safe_expire(self, reservation_id: str) -> None:
         try:
+            self._trace(
+                source="APP",
+                target="DB",
+                action="EXPIRE_RESERVATION",
+                status="START",
+                detail=reservation_id,
+            )
             self._db.expire_reservation(reservation_id)
+            self._trace(
+                source="APP",
+                target="DB",
+                action="EXPIRE_RESERVATION",
+                status="SUCCESS",
+                detail=reservation_id,
+            )
         except Exception:
+            self._trace(
+                source="APP",
+                target="DB",
+                action="EXPIRE_RESERVATION",
+                status="FAIL",
+                detail=reservation_id,
+            )
             return
 
     def _safe_cancel(self, reservation_id: str, event_id: str, seat_id: str, user_id: str) -> None:
@@ -340,14 +536,52 @@ class TicketingOrchestratorService:
 
         for _ in range(REDIS_CONFIRM_RETRY_ATTEMPTS):
             try:
+                self._trace(
+                    source="APP",
+                    target="REDIS",
+                    action="FORCE_CONFIRM_SEAT",
+                    status="START",
+                    event_id=event_id,
+                    seat_id=seat_id,
+                    user_id=user_id,
+                )
                 result = self._redis.force_confirm_seat(event_id, seat_id, user_id)
             except UpstreamError as exc:
+                self._trace(
+                    source="APP",
+                    target="REDIS",
+                    action="FORCE_CONFIRM_SEAT",
+                    status="FAIL",
+                    event_id=event_id,
+                    seat_id=seat_id,
+                    user_id=user_id,
+                    detail=str(exc),
+                )
                 last_error = exc
                 continue
 
             if result.state == "CONFIRMED" and result.user_id == user_id:
+                self._trace(
+                    source="APP",
+                    target="REDIS",
+                    action="FORCE_CONFIRM_SEAT",
+                    status="SUCCESS",
+                    event_id=event_id,
+                    seat_id=seat_id,
+                    user_id=user_id,
+                )
                 return result
 
+            self._trace(
+                source="APP",
+                target="REDIS",
+                action="FORCE_CONFIRM_SEAT",
+                status="FAIL",
+                event_id=event_id,
+                seat_id=seat_id,
+                user_id=user_id,
+                detail=f"state={result.state}",
+            )
             last_error = UpstreamError(
                 "Redis returned an unexpected seat state during confirmation finalization"
             )
@@ -357,3 +591,26 @@ class TicketingOrchestratorService:
                 "Redis did not finalize the confirmed seat"
             )
         raise last_error
+
+    def _trace(
+        self,
+        *,
+        source: str,
+        target: str,
+        action: str,
+        status: str,
+        event_id: str | None = None,
+        seat_id: str | None = None,
+        user_id: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        self._orchestration_log.record(
+            source=source,
+            target=target,
+            action=action,
+            status=status,
+            event_id=event_id,
+            seat_id=seat_id,
+            user_id=user_id,
+            detail=detail,
+        )

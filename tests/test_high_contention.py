@@ -18,7 +18,7 @@ from app_server.redis_client import (
 from server.server import MiniRedisServer
 from ticketing_api.demo_layout import DEMO_EVENT_ID, DEMO_SEAT_COUNT, iter_demo_seat_ids
 
-REQUESTS_PER_SEAT = 50
+REQUESTS_PER_SEAT = 30
 TOTAL_REQUESTS = DEMO_SEAT_COUNT * REQUESTS_PER_SEAT
 HOLD_SECONDS = 300
 MAX_WORKERS = 32

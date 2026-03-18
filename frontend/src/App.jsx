@@ -1,20 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import LogPanel from "./components/LogPanel";
-import QueuePanel from "./components/QueuePanel";
+import OrchestrationPanel from "./components/OrchestrationPanel";
+import RedisWorkerPanel from "./components/RedisWorkerPanel";
 import SeatGrid from "./components/SeatGrid";
 import UserPanel from "./components/UserPanel";
 import {
   apiCapabilities,
   apiMode,
+  clearOrchestrationLogs,
   confirmSeat,
   fetchConfirmedSeats,
-  fetchQueueSnapshot,
+  fetchOrchestrationLogs,
   fetchSeats,
   getSeatIdPool,
-  joinQueue,
-  leaveQueue,
-  peekQueue,
-  popQueue,
   releaseSeat,
   reserveSeat,
   resetDemo,
@@ -80,27 +78,39 @@ function countSeatStates(seats) {
 
 const PAGE_TITLE = "Redis \uAE30\uBC18 \uC2E4\uC2DC\uAC04 \uC88C\uC11D \uC120\uC810 \uB370\uBAA8";
 const PAGE_DESCRIPTION =
-  "200 seats on screen, 10,000 reserve attempts in the crowd burst, and live Redis state changes.";
+  "66 seats on screen, 1,980 reserve attempts in the crowd burst, with Redis worker backlog and DB orchestration flow.";
 const BURST_LOG_INTERVAL = 250;
 const BURST_RENDER_INTERVAL = 50;
+const REDIS_RECENT_OPERATION_LIMIT = 18;
+
+function createWorkerOperation({ userId, command, seatId, status, note = "" }) {
+  return {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    userId,
+    command,
+    seatId,
+    status,
+    note,
+    updatedAt: new Date().toISOString(),
+  };
+}
 
 export default function App() {
   const seatIdPool = getSeatIdPool();
   const [selectedUser, setSelectedUser] = useState(DEMO_USERS[0]);
   const [seats, setSeats] = useState(createSeatSkeletons());
-  const [queueEntries, setQueueEntries] = useState([]);
-  const [queueFrontUserId, setQueueFrontUserId] = useState(null);
   const [logs, setLogs] = useState([
     createLogEntry(`frontend ready (${apiMode.toUpperCase()} mode)`),
   ]);
   const [bookingStarted, setBookingStarted] = useState(false);
   const [busySeatId, setBusySeatId] = useState("");
-  const [queueBusy, setQueueBusy] = useState(false);
   const [userActionBusy, setUserActionBusy] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [confirmedSeats, setConfirmedSeats] = useState([]);
+  const [orchestrationLogs, setOrchestrationLogs] = useState([]);
+  const [isClearingOrchestration, setIsClearingOrchestration] = useState(false);
   const [burstStats, setBurstStats] = useState({
     total: TOTAL_BURST_REQUESTS,
     completed: 0,
@@ -108,9 +118,19 @@ export default function App() {
     failures: 0,
     lastSeatId: "-",
   });
+  const [redisWorker, setRedisWorker] = useState({
+    queued: 0,
+    inFlight: 0,
+    completed: 0,
+    successes: 0,
+    failures: 0,
+    peakInFlight: 0,
+    recentOperations: [],
+  });
 
   const previousSeatsRef = useRef([]);
   const simulationTimeoutsRef = useRef([]);
+  const dashboardRequestRef = useRef(0);
 
   function pushLogs(nextEntries) {
     setLogs((currentLogs) => [...nextEntries, ...currentLogs].slice(0, 180));
@@ -125,6 +145,113 @@ export default function App() {
       window.clearTimeout(timeoutId);
     });
     simulationTimeoutsRef.current = [];
+  }
+
+  function resetRedisWorker() {
+    setRedisWorker({
+      queued: 0,
+      inFlight: 0,
+      completed: 0,
+      successes: 0,
+      failures: 0,
+      peakInFlight: 0,
+      recentOperations: [],
+    });
+  }
+
+  function enqueueRedisOperation(userId, command, seatId) {
+    const operation = createWorkerOperation({
+      userId,
+      command,
+      seatId,
+      status: "queued",
+    });
+
+    setRedisWorker((current) => ({
+      ...current,
+      queued: current.queued + 1,
+      recentOperations: [operation, ...current.recentOperations].slice(
+        0,
+        REDIS_RECENT_OPERATION_LIMIT,
+      ),
+    }));
+
+    return operation.id;
+  }
+
+  function startRedisOperation(operationId) {
+    setRedisWorker((current) => {
+      const nextInFlight = current.inFlight + 1;
+
+      return {
+        ...current,
+        queued: Math.max(0, current.queued - 1),
+        inFlight: nextInFlight,
+        peakInFlight: Math.max(current.peakInFlight, nextInFlight),
+        recentOperations: current.recentOperations.map((operation) =>
+          operation.id === operationId
+            ? {
+                ...operation,
+                status: "running",
+                updatedAt: new Date().toISOString(),
+              }
+            : operation,
+        ),
+      };
+    });
+  }
+
+  function finishRedisOperation(operationId, status, note = "") {
+    setRedisWorker((current) => ({
+      ...current,
+      inFlight: Math.max(0, current.inFlight - 1),
+      completed: current.completed + 1,
+      successes: current.successes + (status === "success" ? 1 : 0),
+      failures: current.failures + (status === "fail" ? 1 : 0),
+      recentOperations: current.recentOperations.map((operation) =>
+        operation.id === operationId
+          ? {
+              ...operation,
+              status,
+              note,
+              updatedAt: new Date().toISOString(),
+            }
+          : operation,
+      ),
+    }));
+  }
+
+  function primeRedisQueue(totalCount) {
+    setRedisWorker((current) => ({
+      ...current,
+      queued: current.queued + totalCount,
+    }));
+  }
+
+  function startPrimedRedisOperation(userId, command, seatId) {
+    const operation = createWorkerOperation({
+      userId,
+      command,
+      seatId,
+      status: "running",
+    });
+
+    setRedisWorker((current) => {
+      const nextInFlight = current.inFlight + 1;
+
+      return {
+        ...current,
+        queued: Math.max(0, current.queued - 1),
+        inFlight: nextInFlight,
+        peakInFlight: Math.max(current.peakInFlight, nextInFlight),
+        recentOperations: [operation, ...current.recentOperations].slice(
+          0,
+          REDIS_RECENT_OPERATION_LIMIT,
+        ),
+      };
+    });
+
+    return operation.id;
   }
 
   function detectSeatExpiryLogs(previousSeats, nextSeats) {
@@ -163,23 +290,29 @@ export default function App() {
   }
 
   async function refreshDashboard({ silent = false } = {}) {
+    const requestId = dashboardRequestRef.current + 1;
+    dashboardRequestRef.current = requestId;
+
     if (!silent) {
       setIsRefreshing(true);
     }
 
     try {
-      const [nextSeats, queueSnapshot, nextConfirmedSeats] = await Promise.all([
+      const [nextSeats, nextConfirmedSeats, nextOrchestrationLogs] = await Promise.all([
         fetchSeats(DEMO_EVENT_ID),
-        fetchQueueSnapshot(DEMO_EVENT_ID),
         fetchConfirmedSeats(DEMO_EVENT_ID),
+        fetchOrchestrationLogs(32),
       ]);
+
+      if (requestId !== dashboardRequestRef.current) {
+        return;
+      }
 
       detectSeatExpiryLogs(previousSeatsRef.current, nextSeats);
       previousSeatsRef.current = nextSeats;
       setSeats(nextSeats);
-      setQueueEntries(queueSnapshot.queue);
-      setQueueFrontUserId(queueSnapshot.frontUserId);
       setConfirmedSeats(nextConfirmedSeats);
+      setOrchestrationLogs(nextOrchestrationLogs);
       setLastRefreshAt(new Date());
 
       if (!silent) {
@@ -198,11 +331,15 @@ export default function App() {
   }
 
   async function reserveSeatForUser(userId, seatId) {
+    const operationId = enqueueRedisOperation(userId, "RESERVE_SEAT", seatId);
+    startRedisOperation(operationId);
     setBusySeatId(seatId);
     try {
       await reserveSeat(DEMO_EVENT_ID, seatId, userId, DEFAULT_HOLD_SECONDS);
+      finishRedisOperation(operationId, "success");
       addLog(`${userId} RESERVE_SEAT ${seatId} -> SUCCESS`, "success");
     } catch (error) {
+      finishRedisOperation(operationId, "fail", error.message);
       addLog(`${userId} RESERVE_SEAT ${seatId} -> FAIL (${error.message})`, "error");
     } finally {
       setBusySeatId("");
@@ -211,11 +348,15 @@ export default function App() {
   }
 
   async function confirmSeatForUser(userId, seatId) {
+    const operationId = enqueueRedisOperation(userId, "CONFIRM_SEAT", seatId);
+    startRedisOperation(operationId);
     setUserActionBusy(true);
     try {
       await confirmSeat(DEMO_EVENT_ID, seatId, userId);
+      finishRedisOperation(operationId, "success");
       addLog(`${userId} CONFIRM_SEAT ${seatId} -> SUCCESS`, "success");
     } catch (error) {
+      finishRedisOperation(operationId, "fail", error.message);
       addLog(`${userId} CONFIRM_SEAT ${seatId} -> FAIL (${error.message})`, "error");
     } finally {
       setUserActionBusy(false);
@@ -224,11 +365,15 @@ export default function App() {
   }
 
   async function releaseSeatForUser(userId, seatId) {
+    const operationId = enqueueRedisOperation(userId, "RELEASE_SEAT", seatId);
+    startRedisOperation(operationId);
     setUserActionBusy(true);
     try {
       await releaseSeat(DEMO_EVENT_ID, seatId, userId);
+      finishRedisOperation(operationId, "success");
       addLog(`${userId} RELEASE_SEAT ${seatId} -> SUCCESS`, "warning");
     } catch (error) {
+      finishRedisOperation(operationId, "fail", error.message);
       addLog(`${userId} RELEASE_SEAT ${seatId} -> FAIL (${error.message})`, "error");
     } finally {
       setUserActionBusy(false);
@@ -236,62 +381,17 @@ export default function App() {
     }
   }
 
-  async function joinQueueForUser(userId) {
-    setQueueBusy(true);
+  async function handleClearOrchestration() {
+    setIsClearingOrchestration(true);
+    dashboardRequestRef.current += 1;
     try {
-      const result = await joinQueue(DEMO_EVENT_ID, userId);
-      const outcome = result.joined ? "JOIN_QUEUE" : "JOIN_QUEUE (duplicate)";
-      addLog(`${userId} ${outcome} -> position ${result.position}`, "info");
+      await clearOrchestrationLogs();
+      setOrchestrationLogs([]);
+      addLog("ORCHESTRATION_CLEAR -> SUCCESS", "info");
     } catch (error) {
-      addLog(`${userId} JOIN_QUEUE -> FAIL (${error.message})`, "error");
+      addLog(`ORCHESTRATION_CLEAR -> FAIL (${error.message})`, "error");
     } finally {
-      setQueueBusy(false);
-      await refreshDashboard({ silent: true });
-    }
-  }
-
-  async function leaveQueueForUser(userId) {
-    setQueueBusy(true);
-    try {
-      const result = await leaveQueue(DEMO_EVENT_ID, userId);
-      const outcome = result.removed
-        ? `removed from position ${result.previousPosition}`
-        : "not in queue";
-      addLog(`${userId} LEAVE_QUEUE -> ${outcome}`, result.removed ? "warning" : "info");
-    } catch (error) {
-      addLog(`${userId} LEAVE_QUEUE -> FAIL (${error.message})`, "error");
-    } finally {
-      setQueueBusy(false);
-      await refreshDashboard({ silent: true });
-    }
-  }
-
-  async function popQueueFront() {
-    setQueueBusy(true);
-    try {
-      const result = await popQueue(DEMO_EVENT_ID);
-      addLog(
-        `POP_QUEUE -> ${result.userId ?? "empty"} / remaining ${result.queueLength}`,
-        result.userId ? "warning" : "info",
-      );
-    } catch (error) {
-      addLog(`POP_QUEUE -> FAIL (${error.message})`, "error");
-    } finally {
-      setQueueBusy(false);
-      await refreshDashboard({ silent: true });
-    }
-  }
-
-  async function peekQueueFront() {
-    setQueueBusy(true);
-    try {
-      const result = await peekQueue(DEMO_EVENT_ID);
-      addLog(`PEEK_QUEUE -> ${result.userId ?? "empty"}`, "info");
-    } catch (error) {
-      addLog(`PEEK_QUEUE -> FAIL (${error.message})`, "error");
-    } finally {
-      setQueueBusy(false);
-      await refreshDashboard({ silent: true });
+      setIsClearingOrchestration(false);
     }
   }
 
@@ -299,6 +399,14 @@ export default function App() {
     clearSimulationTimeouts();
     setIsSimulating(false);
     setBookingStarted(true);
+    resetRedisWorker();
+    setBurstStats({
+      total: TOTAL_BURST_REQUESTS,
+      completed: 0,
+      successes: 0,
+      failures: 0,
+      lastSeatId: "-",
+    });
 
     if (apiCapabilities.supportsResetDemo) {
       await resetDemo(DEMO_EVENT_ID);
@@ -347,24 +455,21 @@ export default function App() {
     const conflictSeat = randomFrom(seatIdPool);
     const alternateSeat =
       seatIdPool.find((seatId) => seatId !== conflictSeat) ?? "B1";
+    const releaseSeatId =
+      seatIdPool.find(
+        (seatId) => seatId !== conflictSeat && seatId !== alternateSeat,
+      ) ?? alternateSeat;
 
     try {
       const steps = [
-        scheduleStep(100, () => joinQueueForUser("user-1")),
-        scheduleStep(180, () => joinQueueForUser("user-2")),
-        scheduleStep(260, () => joinQueueForUser("user-3")),
-        scheduleStep(520, () => reserveSeatForUser("user-1", conflictSeat)),
-        scheduleStep(560, () => reserveSeatForUser("user-2", conflictSeat)),
-        scheduleStep(700, () => reserveSeatForUser("user-3", alternateSeat)),
-        scheduleStep(1120, () => confirmSeatForUser("user-1", conflictSeat)),
-        scheduleStep(1480, () => releaseSeatForUser("user-3", alternateSeat)),
+        scheduleStep(120, () => reserveSeatForUser("user-1", conflictSeat)),
+        scheduleStep(180, () => reserveSeatForUser("user-2", conflictSeat)),
+        scheduleStep(320, () => reserveSeatForUser("user-3", alternateSeat)),
+        scheduleStep(760, () => confirmSeatForUser("user-1", conflictSeat)),
+        scheduleStep(980, () => reserveSeatForUser("user-2", alternateSeat)),
+        scheduleStep(1240, () => reserveSeatForUser("user-3", releaseSeatId)),
+        scheduleStep(1620, () => releaseSeatForUser("user-3", releaseSeatId)),
       ];
-
-      if (apiCapabilities.supportsPopQueue) {
-        steps.push(scheduleStep(1850, () => popQueueFront()));
-      }
-
-      steps.push(scheduleStep(2100, () => peekQueueFront()));
       await Promise.all(steps);
       addLog("SIMULATION_END", "success");
     } finally {
@@ -397,6 +502,7 @@ export default function App() {
     );
 
     const attempts = buildBurstAttempts(seatIdPool);
+    primeRedisQueue(attempts.length);
     const concurrency = apiMode === "real" ? 24 : 40;
     let nextIndex = 0;
     let nextLogAt = BURST_LOG_INTERVAL;
@@ -417,10 +523,18 @@ export default function App() {
           return;
         }
 
+        const operationId = startPrimedRedisOperation(
+          attempt.userId,
+          "RESERVE_SEAT",
+          attempt.seatId,
+        );
+
         try {
           await reserveSeat(DEMO_EVENT_ID, attempt.seatId, attempt.userId, DEFAULT_HOLD_SECONDS);
+          finishRedisOperation(operationId, "success");
           stats.successes += 1;
-        } catch {
+        } catch (error) {
+          finishRedisOperation(operationId, "fail", error.message);
           stats.failures += 1;
         }
 
@@ -477,9 +591,6 @@ export default function App() {
   );
   const myConfirmedSeats = confirmedSeats.filter(
     (seat) => seat.userId === selectedUser,
-  );
-  const selectedUserQueueEntry = queueEntries.find(
-    (entry) => entry.userId === selectedUser,
   );
 
   return (
@@ -599,7 +710,6 @@ export default function App() {
             users={DEMO_USERS}
             myHeldSeats={myHeldSeats}
             myConfirmedSeats={myConfirmedSeats}
-            queuePosition={selectedUserQueueEntry?.position ?? -1}
             onConfirm={(seatId) => confirmSeatForUser(selectedUser, seatId)}
             onRelease={(seatId) => releaseSeatForUser(selectedUser, seatId)}
             isBusy={userActionBusy}
@@ -608,17 +718,19 @@ export default function App() {
 
         <div className="side-column">
           <LogPanel logs={logs} />
-          <QueuePanel
-            queueEntries={queueEntries}
-            queueLength={queueEntries.length}
-            frontUserId={queueFrontUserId}
-            selectedUser={selectedUser}
-            isBusy={queueBusy}
-            onJoin={() => joinQueueForUser(selectedUser)}
-            onPop={popQueueFront}
-            onLeave={() => leaveQueueForUser(selectedUser)}
-            onPeek={peekQueueFront}
-            canPop={apiCapabilities.supportsPopQueue}
+          <OrchestrationPanel
+            entries={orchestrationLogs}
+            onClear={handleClearOrchestration}
+            isClearing={isClearingOrchestration}
+          />
+          <RedisWorkerPanel
+            queuedCount={redisWorker.queued}
+            inFlightCount={redisWorker.inFlight}
+            completedCount={redisWorker.completed}
+            successCount={redisWorker.successes}
+            failureCount={redisWorker.failures}
+            peakInFlight={redisWorker.peakInFlight}
+            recentOperations={redisWorker.recentOperations}
           />
         </div>
       </main>

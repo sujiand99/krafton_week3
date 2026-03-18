@@ -348,3 +348,90 @@ def test_app_server_uses_force_confirm_after_db_commit() -> None:
         assert confirm.json()["seat"]["status"] == "CONFIRMED"
     finally:
         db_path.unlink(missing_ok=True)
+
+
+def test_app_server_exposes_orchestration_logs() -> None:
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+    redis_server = MiniRedisServer(port=0, db_path=None)
+    redis_thread = threading.Thread(target=redis_server.serve_forever, daemon=True)
+    redis_thread.start()
+    host, port = redis_server.wait_until_started()
+
+    try:
+        with TestClient(create_db_app(db_path)) as db_http:
+            app = create_app(
+                redis_client=RedisRESPClient(host=host, port=port),
+                db_client=TicketingDBClient(http_client=db_http),
+            )
+            with TestClient(app) as client:
+                hold = client.post(
+                    "/reservations/hold",
+                    json={
+                        "event_id": "concert-seoul-2026",
+                        "seat_id": "A7",
+                        "user_id": "user-1",
+                        "hold_seconds": 30,
+                    },
+                )
+                reservation_id = hold.json()["reservation"]["reservation_id"]
+                client.post(
+                    f"/reservations/{reservation_id}/confirm",
+                    json={
+                        "event_id": "concert-seoul-2026",
+                        "seat_id": "A7",
+                        "user_id": "user-1",
+                    },
+                )
+                response = client.get("/orchestration/logs?limit=20")
+
+        assert response.status_code == 200
+        logs = response.json()
+        actions = {(entry["target"], entry["action"], entry["status"]) for entry in logs}
+        assert ("REDIS", "RESERVE_SEAT", "SUCCESS") in actions
+        assert ("DB", "CREATE_HELD", "SUCCESS") in actions
+        assert ("DB", "CONFIRM_RESERVATION", "SUCCESS") in actions
+        assert ("REDIS", "FORCE_CONFIRM_SEAT", "SUCCESS") in actions
+    finally:
+        redis_server.shutdown()
+        redis_thread.join(timeout=2)
+        db_path.unlink(missing_ok=True)
+
+
+def test_app_server_clears_orchestration_logs() -> None:
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+    redis_server = MiniRedisServer(port=0, db_path=None)
+    redis_thread = threading.Thread(target=redis_server.serve_forever, daemon=True)
+    redis_thread.start()
+    host, port = redis_server.wait_until_started()
+
+    try:
+        with TestClient(create_db_app(db_path)) as db_http:
+            app = create_app(
+                redis_client=RedisRESPClient(host=host, port=port),
+                db_client=TicketingDBClient(http_client=db_http),
+            )
+            with TestClient(app) as client:
+                client.post(
+                    "/reservations/hold",
+                    json={
+                        "event_id": "concert-seoul-2026",
+                        "seat_id": "A8",
+                        "user_id": "user-1",
+                        "hold_seconds": 30,
+                    },
+                )
+                before_clear = client.get("/orchestration/logs?limit=20")
+                cleared = client.delete("/orchestration/logs")
+                after_clear = client.get("/orchestration/logs?limit=20")
+
+        assert before_clear.status_code == 200
+        assert len(before_clear.json()) > 0
+        assert cleared.status_code == 204
+        assert after_clear.status_code == 200
+        assert after_clear.json() == []
+    finally:
+        redis_server.shutdown()
+        redis_thread.join(timeout=2)
+        db_path.unlink(missing_ok=True)

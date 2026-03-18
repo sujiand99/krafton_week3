@@ -4,7 +4,6 @@ export default function UserPanel({
   users,
   myHeldSeats,
   myConfirmedSeats,
-  queuePosition,
   onConfirm,
   onRelease,
   isBusy,
@@ -17,7 +16,7 @@ export default function UserPanel({
           <h2>User state</h2>
         </div>
         <span className="subtle-badge">
-          queue position: {queuePosition > 0 ? queuePosition : "-"}
+          active holds: {myHeldSeats.length}
         </span>
       </div>
 

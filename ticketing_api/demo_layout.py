@@ -5,8 +5,8 @@ from __future__ import annotations
 from string import ascii_uppercase
 
 DEMO_EVENT_ID = "concert-seoul-2026"
-DEMO_ROW_LABELS = tuple(ascii_uppercase[:10])
-DEMO_SEATS_PER_ROW = 20
+DEMO_ROW_LABELS = tuple(ascii_uppercase[:6])
+DEMO_SEATS_PER_ROW = 11
 DEMO_SEAT_COUNT = len(DEMO_ROW_LABELS) * DEMO_SEATS_PER_ROW
 DEMO_DEFAULT_PRICE = 120_000
 

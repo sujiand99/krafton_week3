@@ -27,6 +27,7 @@ function createInitialState() {
     })),
     queue: [],
     reservations: [],
+    orchestrationLogs: [],
   };
 }
 
@@ -147,6 +148,30 @@ function getNowIso() {
   return new Date().toISOString();
 }
 
+function recordOrchestrationLog({
+  source,
+  target,
+  action,
+  status,
+  eventId = null,
+  seatId = null,
+  userId = null,
+  detail = null,
+}) {
+  demoState.orchestrationLogs.unshift({
+    timestamp: getNowIso(),
+    source,
+    target,
+    action,
+    status,
+    eventId,
+    seatId,
+    userId,
+    detail,
+  });
+  demoState.orchestrationLogs = demoState.orchestrationLogs.slice(0, 80);
+}
+
 function createReservation(eventId, seatId, userId, holdSeconds) {
   const now = getNowIso();
   const expiresAt = new Date(Date.now() + holdSeconds * 1000).toISOString();
@@ -190,6 +215,17 @@ export async function fetchConfirmedSeats(eventId) {
     .map(cloneSeat);
 }
 
+export async function fetchOrchestrationLogs(limit = 40) {
+  await waitForDelay();
+  return demoState.orchestrationLogs.slice(0, limit);
+}
+
+export async function clearOrchestrationLogs() {
+  await waitForDelay();
+  demoState.orchestrationLogs = [];
+  return null;
+}
+
 export async function seatStatus(eventId, seatId) {
   ensureEvent(eventId);
   await waitForDelay();
@@ -213,12 +249,41 @@ export async function reserveSeat(
 
   const seat = findSeatOrThrow(eventId, seatId);
   const holdSeconds = Number(ttlSeconds || DEFAULT_HOLD_SECONDS);
+  recordOrchestrationLog({
+    source: "APP",
+    target: "REDIS",
+    action: "RESERVE_SEAT",
+    status: "START",
+    eventId,
+    seatId,
+    userId,
+  });
 
   if (seat.status === "confirmed") {
+    recordOrchestrationLog({
+      source: "APP",
+      target: "REDIS",
+      action: "RESERVE_SEAT",
+      status: "FAIL",
+      eventId,
+      seatId,
+      userId,
+      detail: `${seatId} is already confirmed`,
+    });
     throw new Error(`${seatId} is already confirmed`);
   }
 
   if (seat.status === "held" && seat.userId !== userId) {
+    recordOrchestrationLog({
+      source: "APP",
+      target: "REDIS",
+      action: "RESERVE_SEAT",
+      status: "FAIL",
+      eventId,
+      seatId,
+      userId,
+      detail: `${seatId} is already held by ${seat.userId}`,
+    });
     throw new Error(`${seatId} is already held by ${seat.userId}`);
   }
 
@@ -237,6 +302,26 @@ export async function reserveSeat(
   seat.expiresAt = Date.now() + holdSeconds * 1000;
   seat.ttl = holdSeconds;
   seat.reservationId = reservation.reservationId;
+  recordOrchestrationLog({
+    source: "APP",
+    target: "REDIS",
+    action: "RESERVE_SEAT",
+    status: "SUCCESS",
+    eventId,
+    seatId,
+    userId,
+    detail: `ttl=${holdSeconds}`,
+  });
+  recordOrchestrationLog({
+    source: "APP",
+    target: "DB",
+    action: "CREATE_HELD",
+    status: "SUCCESS",
+    eventId,
+    seatId,
+    userId,
+    detail: reservation.reservationId,
+  });
 
   return {
     success: true,
@@ -252,11 +337,31 @@ export async function confirmSeat(eventId, seatId, userId) {
   syncExpirations();
 
   const seat = findSeatOrThrow(eventId, seatId);
+  recordOrchestrationLog({
+    source: "APP",
+    target: "REDIS",
+    action: "SEAT_STATUS",
+    status: "SUCCESS",
+    eventId,
+    seatId,
+    userId,
+    detail: `state=${seat.status.toUpperCase()}`,
+  });
   if (seat.status === "confirmed" && seat.userId === userId) {
     return { success: true, seat: cloneSeat(seat) };
   }
 
   if (seat.status !== "held" || seat.userId !== userId) {
+    recordOrchestrationLog({
+      source: "APP",
+      target: "REDIS",
+      action: "SEAT_STATUS",
+      status: "FAIL",
+      eventId,
+      seatId,
+      userId,
+      detail: `${seatId} cannot be confirmed by ${userId}`,
+    });
     throw new Error(`${seatId} cannot be confirmed by ${userId}`);
   }
 
@@ -265,10 +370,38 @@ export async function confirmSeat(eventId, seatId, userId) {
     reservation.status = "CONFIRMED";
     reservation.updatedAt = getNowIso();
   }
+  recordOrchestrationLog({
+    source: "APP",
+    target: "PAYMENT",
+    action: "MOCK_APPROVE",
+    status: "SUCCESS",
+    eventId,
+    seatId,
+    userId,
+  });
+  recordOrchestrationLog({
+    source: "APP",
+    target: "DB",
+    action: "CONFIRM_RESERVATION",
+    status: "SUCCESS",
+    eventId,
+    seatId,
+    userId,
+    detail: reservation?.reservationId ?? null,
+  });
 
   seat.status = "confirmed";
   seat.ttl = null;
   seat.expiresAt = null;
+  recordOrchestrationLog({
+    source: "APP",
+    target: "REDIS",
+    action: "FORCE_CONFIRM_SEAT",
+    status: "SUCCESS",
+    eventId,
+    seatId,
+    userId,
+  });
 
   return {
     success: true,
@@ -290,7 +423,26 @@ export async function releaseSeat(eventId, seatId, userId) {
   syncExpirations();
 
   const seat = findSeatOrThrow(eventId, seatId);
+  recordOrchestrationLog({
+    source: "APP",
+    target: "DB",
+    action: "CANCEL_RESERVATION",
+    status: "START",
+    eventId,
+    seatId,
+    userId,
+  });
   if (seat.status !== "held" || seat.userId !== userId) {
+    recordOrchestrationLog({
+      source: "APP",
+      target: "REDIS",
+      action: "RELEASE_SEAT",
+      status: "FAIL",
+      eventId,
+      seatId,
+      userId,
+      detail: `${seatId} cannot be released by ${userId}`,
+    });
     throw new Error(`${seatId} cannot be released by ${userId}`);
   }
 
@@ -299,12 +451,31 @@ export async function releaseSeat(eventId, seatId, userId) {
     reservation.status = "CANCELLED";
     reservation.updatedAt = getNowIso();
   }
+  recordOrchestrationLog({
+    source: "APP",
+    target: "DB",
+    action: "CANCEL_RESERVATION",
+    status: "SUCCESS",
+    eventId,
+    seatId,
+    userId,
+    detail: reservation?.reservationId ?? null,
+  });
 
   seat.status = "available";
   seat.userId = null;
   seat.ttl = null;
   seat.expiresAt = null;
   seat.reservationId = null;
+  recordOrchestrationLog({
+    source: "APP",
+    target: "REDIS",
+    action: "RELEASE_SEAT",
+    status: "SUCCESS",
+    eventId,
+    seatId,
+    userId,
+  });
 
   return {
     success: true,

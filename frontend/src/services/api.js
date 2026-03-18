@@ -251,6 +251,18 @@ async function fetchConfirmedSeatsReal(eventId) {
   );
 }
 
+async function fetchOrchestrationLogsReal(limit = 40) {
+  return requestJson(
+    `${APP_SERVER_BASE_URL}/orchestration/logs?limit=${encodeURIComponent(limit)}`,
+  );
+}
+
+async function clearOrchestrationLogsReal() {
+  return requestJson(`${APP_SERVER_BASE_URL}/orchestration/logs`, {
+    method: "DELETE",
+  });
+}
+
 export async function resetDemo(eventId = DEMO_EVENT_ID) {
   if (apiMode === "mock") {
     return mockApi.resetDemo(eventId);
@@ -326,6 +338,18 @@ export async function fetchConfirmedSeats(eventId) {
   return apiMode === "mock"
     ? mockApi.fetchConfirmedSeats(eventId)
     : fetchConfirmedSeatsReal(eventId);
+}
+
+export async function fetchOrchestrationLogs(limit = 40) {
+  return apiMode === "mock"
+    ? mockApi.fetchOrchestrationLogs(limit)
+    : fetchOrchestrationLogsReal(limit);
+}
+
+export async function clearOrchestrationLogs() {
+  return apiMode === "mock"
+    ? mockApi.clearOrchestrationLogs()
+    : clearOrchestrationLogsReal();
 }
 
 export async function fetchQueueSnapshot(eventId) {

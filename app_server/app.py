@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app_server.db_client import TicketingDBClient
 from app_server.exceptions import ConflictError, NotFoundError, UpstreamError
+from app_server.orchestration_log import OrchestrationLogStore
 from app_server.redis_client import RedisRESPClient
 from app_server.schemas import (
     CancelReservationRequest,
@@ -18,6 +19,7 @@ from app_server.schemas import (
     EventResponse,
     HoldReservationRequest,
     HoldReservationResponse,
+    OrchestrationLogEntryResponse,
     PurchaseReservationRequest,
     PurchaseReservationResponse,
     QueueFrontResponse,
@@ -44,7 +46,12 @@ def create_app(
 
     redis_gateway = redis_client or RedisRESPClient(host=redis_host, port=redis_port)
     db_gateway = db_client or TicketingDBClient(base_url=db_base_url)
-    service = TicketingOrchestratorService(redis_gateway, db_gateway)
+    orchestration_log = OrchestrationLogStore()
+    service = TicketingOrchestratorService(
+        redis_gateway,
+        db_gateway,
+        orchestration_log=orchestration_log,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -92,6 +99,25 @@ def create_app(
     )
     def list_user_reservations(user_id: str, request: Request) -> list[dict[str, object]]:
         return get_service(request).list_user_reservations(user_id)
+
+    @app.get(
+        "/orchestration/logs",
+        response_model=list[OrchestrationLogEntryResponse],
+    )
+    def list_orchestration_logs(
+        request: Request,
+        limit: int = 40,
+    ) -> list[dict[str, object]]:
+        bounded_limit = max(1, min(limit, 120))
+        return get_service(request).list_orchestration_logs(bounded_limit)
+
+    @app.delete(
+        "/orchestration/logs",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def clear_orchestration_logs(request: Request) -> Response:
+        get_service(request).clear_orchestration_logs()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post("/queue/join", response_model=QueueJoinResponse, status_code=status.HTTP_201_CREATED)
     def join_queue(payload: QueueJoinRequest, request: Request) -> dict[str, object]:
