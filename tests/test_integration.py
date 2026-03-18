@@ -10,6 +10,7 @@ import pytest
 
 from server import server as server_module
 from server.server import MiniRedisServer
+from storage.engine import StorageEngine
 
 
 class FakeConnection:
@@ -39,11 +40,38 @@ class DummyStorage:
     """Simple placeholder storage object for server tests."""
 
 
+class FakeClock:
+    def __init__(self, start: float = 100.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+def encode_command(*tokens: str) -> bytes:
+    parts = [f"*{len(tokens)}\r\n".encode("utf-8")]
+    for token in tokens:
+        encoded = token.encode("utf-8")
+        parts.append(f"${len(encoded)}\r\n".encode("utf-8"))
+        parts.append(encoded + b"\r\n")
+    return b"".join(parts)
+
+
+def send_command(client: socket.socket, *tokens: str) -> str:
+    client.sendall(encode_command(*tokens))
+    return client.recv(1024).decode("utf-8")
+
+
 def test_encode_command_result_maps_command_types_to_resp() -> None:
     assert server_module.encode_command_result(["SET", "a", "1"], "OK") == "+OK\r\n"
     assert server_module.encode_command_result(["GET", "a"], "10") == "$2\r\n10\r\n"
     assert server_module.encode_command_result(["GET", "missing"], None) == "$-1\r\n"
     assert server_module.encode_command_result(["DEL", "a"], 1) == ":1\r\n"
+    assert server_module.encode_command_result(["EXPIRE", "a", "10"], 1) == ":1\r\n"
+    assert server_module.encode_command_result(["TTL", "a"], -1) == ":-1\r\n"
 
 
 def test_encode_command_result_rejects_unsupported_command() -> None:
@@ -157,6 +185,101 @@ def test_server_processes_multiple_requests_on_one_connection() -> None:
         server_thread.join(timeout=2)
 
 
+def test_server_expires_keys_after_deadline_using_injected_clock() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+    server = MiniRedisServer(port=0, storage=storage)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert send_command(client, "SET", "a", "1") == "+OK\r\n"
+            assert send_command(client, "EXPIRE", "a", "10") == ":1\r\n"
+            assert send_command(client, "GET", "a") == "$1\r\n1\r\n"
+
+            clock.advance(10)
+
+            assert send_command(client, "GET", "a") == "$-1\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_applies_expire_options_over_resp() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+    server = MiniRedisServer(port=0, storage=storage)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert send_command(client, "SET", "a", "1") == "+OK\r\n"
+            assert send_command(client, "EXPIRE", "a", "10", "NX") == ":1\r\n"
+            assert send_command(client, "EXPIRE", "a", "20", "NX") == ":0\r\n"
+            assert send_command(client, "EXPIRE", "a", "20", "XX") == ":1\r\n"
+            assert send_command(client, "EXPIRE", "a", "15", "GT") == ":0\r\n"
+            assert send_command(client, "EXPIRE", "a", "25", "GT") == ":1\r\n"
+            assert send_command(client, "EXPIRE", "a", "30", "LT") == ":0\r\n"
+            assert send_command(client, "EXPIRE", "a", "5", "LT") == ":1\r\n"
+            assert send_command(client, "SET", "b", "1") == "+OK\r\n"
+            assert send_command(client, "EXPIRE", "b", "5", "GT") == ":0\r\n"
+            assert send_command(client, "EXPIRE", "b", "5", "LT") == ":1\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_deletes_key_immediately_for_non_positive_expire() -> None:
+    storage = StorageEngine(clock=FakeClock())
+    server = MiniRedisServer(port=0, storage=storage)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert send_command(client, "SET", "a", "1") == "+OK\r\n"
+            assert send_command(client, "EXPIRE", "a", "0") == ":1\r\n"
+            assert send_command(client, "GET", "a") == "$-1\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_returns_ttl_over_resp() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+    server = MiniRedisServer(port=0, storage=storage)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert send_command(client, "TTL", "missing") == ":-2\r\n"
+            assert send_command(client, "SET", "a", "1") == "+OK\r\n"
+            assert send_command(client, "TTL", "a") == ":-1\r\n"
+            assert send_command(client, "EXPIRE", "a", "10") == ":1\r\n"
+            assert send_command(client, "TTL", "a") == ":10\r\n"
+
+            clock.advance(4)
+
+            assert send_command(client, "TTL", "a") == ":6\r\n"
+
+            clock.advance(6)
+
+            assert send_command(client, "TTL", "a") == ":-2\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
 def test_server_returns_errors_without_dropping_valid_connection_flow() -> None:
     server = MiniRedisServer(port=0)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
