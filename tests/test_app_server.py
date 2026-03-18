@@ -110,6 +110,40 @@ def test_app_server_hold_confirm_and_cancel_flow() -> None:
         db_path.unlink(missing_ok=True)
 
 
+def test_app_server_accepts_synthetic_load_users() -> None:
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+    redis_server = MiniRedisServer(port=0, db_path=None)
+    redis_thread = threading.Thread(target=redis_server.serve_forever, daemon=True)
+    redis_thread.start()
+    host, port = redis_server.wait_until_started()
+
+    try:
+        with TestClient(create_db_app(db_path)) as db_http:
+            app = create_app(
+                redis_client=RedisRESPClient(host=host, port=port),
+                db_client=TicketingDBClient(http_client=db_http),
+            )
+            with TestClient(app) as client:
+                response = client.post(
+                    "/reservations/hold",
+                    json={
+                        "event_id": "concert-seoul-2026",
+                        "seat_id": "A5",
+                        "user_id": "load-user-00001",
+                        "hold_seconds": 45,
+                    },
+                )
+
+        assert response.status_code == 201
+        assert response.json()["reservation"]["user_id"] == "load-user-00001"
+        assert response.json()["seat"]["held_by_user_id"] == "load-user-00001"
+    finally:
+        redis_server.shutdown()
+        redis_thread.join(timeout=2)
+        db_path.unlink(missing_ok=True)
+
+
 def test_app_server_rejects_holding_a_busy_seat() -> None:
     db_path = make_db_path()
     seed_demo_data(db_path)

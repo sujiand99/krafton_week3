@@ -91,6 +91,33 @@ def test_create_held_reservation_and_idempotent_retry() -> None:
         cleanup_db_path(db_path)
 
 
+def test_create_held_reservation_auto_creates_load_user() -> None:
+    db_path = make_db_path()
+    seed_demo_data(db_path)
+
+    try:
+        with TestClient(create_app(db_path)) as client:
+            response = client.post(
+                "/reservations/held",
+                json={
+                    "reservation_id": "res-load-1",
+                    "event_id": "concert-seoul-2026",
+                    "seat_id": "A1",
+                    "user_id": "load-user-00001",
+                    "hold_token": "hold-load-1",
+                    "expires_at": "2026-03-19T11:05:00Z",
+                },
+            )
+            reservations = client.get("/users/load-user-00001/reservations")
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == "load-user-00001"
+        assert reservations.status_code == 200
+        assert reservations.json()[0]["reservation_id"] == "res-load-1"
+    finally:
+        cleanup_db_path(db_path)
+
+
 def test_create_held_reservation_rejects_payload_mismatch() -> None:
     db_path = make_db_path()
     seed_demo_data(db_path)

@@ -60,7 +60,7 @@ class TicketingService:
     ) -> tuple[dict[str, object], bool]:
         self._require_event(request.event_id)
         self._require_seat(request.event_id, request.seat_id)
-        self._require_user(request.user_id)
+        self._ensure_user(request.user_id)
 
         existing = self._repository.get_reservation(request.reservation_id)
         request_expires_at = normalize_timestamp(request.expires_at)
@@ -178,6 +178,24 @@ class TicketingService:
         if user is None:
             raise NotFoundError(f"user '{user_id}' was not found")
         return user
+
+    def _ensure_user(self, user_id: str) -> dict[str, object]:
+        user = self._repository.get_user(user_id)
+        if user is not None:
+            return user
+
+        if user_id.startswith("load-user-"):
+            alias = user_id.removeprefix("load-user-") or "crowd"
+            display_name = f"Load User {alias}"
+            email = f"{user_id}@demo.local"
+            return self._repository.create_user(
+                user_id=user_id,
+                display_name=display_name,
+                email=email,
+                created_at=current_timestamp(),
+            )
+
+        raise NotFoundError(f"user '{user_id}' was not found")
 
     def _require_seat(self, event_id: str, seat_id: str) -> dict[str, object]:
         seat = self._repository.get_seat(event_id, seat_id)

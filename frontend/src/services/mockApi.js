@@ -47,6 +47,10 @@ function ensureEvent(eventId) {
   }
 }
 
+function isSupportedUser(userId) {
+  return DEMO_USERS.includes(userId) || userId.startsWith("load-user-");
+}
+
 function syncExpirations() {
   const now = Date.now();
 
@@ -203,7 +207,7 @@ export async function reserveSeat(
   await waitForDelay();
   syncExpirations();
 
-  if (!DEMO_USERS.includes(userId)) {
+  if (!isSupportedUser(userId)) {
     throw new Error(`unknown user: ${userId}`);
   }
 
@@ -313,7 +317,7 @@ export async function joinQueue(eventId, userId) {
   ensureEvent(eventId);
   await waitForDelay();
 
-  if (!DEMO_USERS.includes(userId)) {
+  if (!isSupportedUser(userId)) {
     throw new Error(`unknown user: ${userId}`);
   }
 

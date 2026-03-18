@@ -57,6 +57,28 @@ class TicketingRepository:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def create_user(
+        self,
+        user_id: str,
+        display_name: str,
+        email: str,
+        created_at: str,
+    ) -> dict[str, object]:
+        with closing(self._database.connect()) as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO users (
+                    user_id,
+                    display_name,
+                    email,
+                    created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (user_id, display_name, email, created_at),
+            )
+            conn.commit()
+        return self.get_user(user_id)  # type: ignore[return-value]
+
     def get_seat(self, event_id: str, seat_id: str) -> dict[str, object] | None:
         with closing(self._database.connect()) as conn:
             row = conn.execute(

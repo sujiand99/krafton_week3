@@ -20,10 +20,12 @@ import {
   resetDemo,
 } from "./services/api";
 import {
+  BURST_REQUEST_MULTIPLIER,
   DEFAULT_HOLD_SECONDS,
   DEMO_EVENT_ID,
   DEMO_USERS,
   POLL_INTERVAL_MS,
+  TOTAL_BURST_REQUESTS,
   createSeatSkeletons,
 } from "./demo/constants";
 
@@ -48,6 +50,24 @@ function randomFrom(list) {
   return list[Math.floor(Math.random() * list.length)];
 }
 
+function buildBurstAttempts(seatIdPool) {
+  const attempts = seatIdPool.flatMap((seatId) =>
+    Array.from({ length: BURST_REQUEST_MULTIPLIER }, (_, index) => ({
+      seatId,
+      userId: `load-user-${seatId}-${String(index + 1).padStart(2, "0")}`,
+    })),
+  );
+
+  for (let index = attempts.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const nextValue = attempts[swapIndex];
+    attempts[swapIndex] = attempts[index];
+    attempts[index] = nextValue;
+  }
+
+  return attempts;
+}
+
 function countSeatStates(seats) {
   return seats.reduce(
     (summary, seat) => {
@@ -60,9 +80,12 @@ function countSeatStates(seats) {
 
 const PAGE_TITLE = "Redis \uAE30\uBC18 \uC2E4\uC2DC\uAC04 \uC88C\uC11D \uC120\uC810 \uB370\uBAA8";
 const PAGE_DESCRIPTION =
-  "Seat holds, TTL expiry, duplicate hold failures, queue flow, and live logs on one screen.";
+  "200 seats on screen, 10,000 reserve attempts in the crowd burst, and live Redis state changes.";
+const BURST_LOG_INTERVAL = 250;
+const BURST_RENDER_INTERVAL = 50;
 
 export default function App() {
+  const seatIdPool = getSeatIdPool();
   const [selectedUser, setSelectedUser] = useState(DEMO_USERS[0]);
   const [seats, setSeats] = useState(createSeatSkeletons());
   const [queueEntries, setQueueEntries] = useState([]);
@@ -78,12 +101,19 @@ export default function App() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [confirmedSeats, setConfirmedSeats] = useState([]);
+  const [burstStats, setBurstStats] = useState({
+    total: TOTAL_BURST_REQUESTS,
+    completed: 0,
+    successes: 0,
+    failures: 0,
+    lastSeatId: "-",
+  });
 
   const previousSeatsRef = useRef([]);
   const simulationTimeoutsRef = useRef([]);
 
   function pushLogs(nextEntries) {
-    setLogs((currentLogs) => [...nextEntries, ...currentLogs].slice(0, 120));
+    setLogs((currentLogs) => [...nextEntries, ...currentLogs].slice(0, 180));
   }
 
   function addLog(message, kind = "info") {
@@ -314,7 +344,6 @@ export default function App() {
     setIsSimulating(true);
     addLog("SIMULATION_START", "info");
 
-    const seatIdPool = getSeatIdPool();
     const conflictSeat = randomFrom(seatIdPool);
     const alternateSeat =
       seatIdPool.find((seatId) => seatId !== conflictSeat) ?? "B1";
@@ -340,6 +369,90 @@ export default function App() {
       addLog("SIMULATION_END", "success");
     } finally {
       clearSimulationTimeouts();
+      setIsSimulating(false);
+      await refreshDashboard({ silent: true });
+    }
+  }
+
+  async function handleBurstSimulation() {
+    if (isSimulating) {
+      return;
+    }
+
+    if (!bookingStarted) {
+      await handleStartBooking();
+    }
+
+    setIsSimulating(true);
+    setBurstStats({
+      total: TOTAL_BURST_REQUESTS,
+      completed: 0,
+      successes: 0,
+      failures: 0,
+      lastSeatId: "-",
+    });
+    addLog(
+      `BURST_START -> ${TOTAL_BURST_REQUESTS.toLocaleString("en-US")} reserve attempts across ${seatIdPool.length} seats`,
+      "warning",
+    );
+
+    const attempts = buildBurstAttempts(seatIdPool);
+    const concurrency = apiMode === "real" ? 24 : 40;
+    let nextIndex = 0;
+    let nextLogAt = BURST_LOG_INTERVAL;
+    const stats = {
+      total: attempts.length,
+      completed: 0,
+      successes: 0,
+      failures: 0,
+      lastSeatId: "-",
+    };
+
+    async function worker() {
+      while (true) {
+        const attempt = attempts[nextIndex];
+        nextIndex += 1;
+
+        if (!attempt) {
+          return;
+        }
+
+        try {
+          await reserveSeat(DEMO_EVENT_ID, attempt.seatId, attempt.userId, DEFAULT_HOLD_SECONDS);
+          stats.successes += 1;
+        } catch {
+          stats.failures += 1;
+        }
+
+        stats.completed += 1;
+        stats.lastSeatId = attempt.seatId;
+
+        if (
+          stats.completed % BURST_RENDER_INTERVAL === 0 ||
+          stats.completed === stats.total
+        ) {
+          setBurstStats({ ...stats });
+        }
+
+        if (stats.completed >= nextLogAt || stats.completed === stats.total) {
+          addLog(
+            `BURST_PROGRESS -> ${stats.completed.toLocaleString("en-US")}/${stats.total.toLocaleString("en-US")} (success ${stats.successes}, fail ${stats.failures})`,
+            "info",
+          );
+          nextLogAt += BURST_LOG_INTERVAL;
+        }
+      }
+    }
+
+    try {
+      await Promise.all(
+        Array.from({ length: concurrency }, () => worker()),
+      );
+      addLog(
+        `BURST_END -> success ${stats.successes}, fail ${stats.failures}, last seat ${stats.lastSeatId}`,
+        "success",
+      );
+    } finally {
       setIsSimulating(false);
       await refreshDashboard({ silent: true });
     }
@@ -382,6 +495,10 @@ export default function App() {
             {apiMode === "mock" ? "MOCK MODE" : "REAL API MODE"}
           </span>
           <span className="event-badge">{DEMO_EVENT_ID}</span>
+          <span className="subtle-badge">{seatIdPool.length} seats</span>
+          <span className="subtle-badge">
+            burst {TOTAL_BURST_REQUESTS.toLocaleString("en-US")} requests
+          </span>
           <span className="subtle-badge">
             last refresh: {lastRefreshAt ? formatTimestamp(lastRefreshAt) : "-"}
           </span>
@@ -409,6 +526,15 @@ export default function App() {
             <span className={bookingStarted ? "live-dot live" : "live-dot"} />
             <span>{bookingStarted ? "Booking live" : "Waiting"}</span>
           </div>
+          <div className="control-status">
+            <span>
+              burst {burstStats.completed.toLocaleString("en-US")}/
+              {burstStats.total.toLocaleString("en-US")}
+            </span>
+            <span>
+              ok {burstStats.successes} / fail {burstStats.failures}
+            </span>
+          </div>
         </div>
 
         <div className="control-actions">
@@ -425,7 +551,15 @@ export default function App() {
             onClick={handleSimulation}
             disabled={isSimulating}
           >
-            Run simulation
+            Run scripted demo
+          </button>
+          <button
+            type="button"
+            className="action-button action-secondary"
+            onClick={handleBurstSimulation}
+            disabled={isSimulating}
+          >
+            Run crowd burst
           </button>
           <button
             type="button"
