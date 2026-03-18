@@ -53,6 +53,58 @@ class FakeClock:
         self._now += seconds
 
 
+class TrackingStorage(StorageEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self._tracking_lock = threading.Lock()
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    def set(self, key: str, value: str) -> None:
+        self._enter_operation()
+        try:
+            super().set(key, value)
+        finally:
+            self._exit_operation()
+
+    def get(self, key: str) -> str | None:
+        self._enter_operation()
+        try:
+            return super().get(key)
+        finally:
+            self._exit_operation()
+
+    def delete(self, key: str) -> bool:
+        self._enter_operation()
+        try:
+            return super().delete(key)
+        finally:
+            self._exit_operation()
+
+    def expire(self, key: str, seconds: int, option: str | None = None) -> bool:
+        self._enter_operation()
+        try:
+            return super().expire(key, seconds, option)
+        finally:
+            self._exit_operation()
+
+    def ttl(self, key: str) -> int:
+        self._enter_operation()
+        try:
+            return super().ttl(key)
+        finally:
+            self._exit_operation()
+
+    def _enter_operation(self) -> None:
+        with self._tracking_lock:
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+
+    def _exit_operation(self) -> None:
+        with self._tracking_lock:
+            self.active_calls -= 1
+
+
 def encode_command(*tokens: str) -> bytes:
     parts = [f"*{len(tokens)}\r\n".encode("utf-8")]
     for token in tokens:
@@ -458,6 +510,153 @@ def test_server_returns_errors_without_dropping_valid_connection_flow() -> None:
 
             client.sendall(b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n2\r\n")
             assert client.recv(1024).decode("utf-8") == "+OK\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_serializes_commands_from_multiple_clients() -> None:
+    storage = TrackingStorage()
+    server = MiniRedisServer(port=0, storage=storage)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+    barrier = threading.Barrier(4)
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def client_session(client_id: int) -> None:
+        key = f"client-{client_id}"
+        value = f"value-{client_id}"
+
+        try:
+            barrier.wait(timeout=1)
+            with socket.create_connection((host, port), timeout=2) as client:
+                assert send_command(client, "SET", key, value) == "+OK\r\n"
+                assert send_command(client, "GET", key) == f"${len(value)}\r\n{value}\r\n"
+                assert send_command(client, "DEL", key) == ":1\r\n"
+        except BaseException as exc:
+            with errors_lock:
+                errors.append(exc)
+
+    clients = [threading.Thread(target=client_session, args=(index,)) for index in range(4)]
+
+    try:
+        for client in clients:
+            client.start()
+
+        for client in clients:
+            client.join(timeout=3)
+            assert not client.is_alive()
+
+        assert not errors
+        assert storage.max_active_calls == 1
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_supports_ticketing_seat_flow() -> None:
+    server = MiniRedisServer(port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert (
+                send_command(client, "SEAT_STATUS", "concert", "A-1")
+                == "*3\r\n$9\r\nAVAILABLE\r\n$-1\r\n:-1\r\n"
+            )
+            assert (
+                send_command(client, "RESERVE_SEAT", "concert", "A-1", "user-1", "30")
+                == "*4\r\n:1\r\n$4\r\nHELD\r\n$6\r\nuser-1\r\n:30\r\n"
+            )
+            assert (
+                send_command(client, "RESERVE_SEAT", "concert", "A-1", "user-2", "30")
+                == "*4\r\n:0\r\n$4\r\nHELD\r\n$6\r\nuser-1\r\n:30\r\n"
+            )
+            assert (
+                send_command(client, "CONFIRM_SEAT", "concert", "A-1", "user-1")
+                == "*4\r\n:1\r\n$9\r\nCONFIRMED\r\n$6\r\nuser-1\r\n:-1\r\n"
+            )
+            assert (
+                send_command(client, "SEAT_STATUS", "concert", "A-1")
+                == "*3\r\n$9\r\nCONFIRMED\r\n$6\r\nuser-1\r\n:-1\r\n"
+            )
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_releases_hold_after_ticketing_seat_ttl_expires() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+    server = MiniRedisServer(port=0, storage=storage)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert (
+                send_command(client, "RESERVE_SEAT", "concert", "A-1", "user-1", "5")
+                == "*4\r\n:1\r\n$4\r\nHELD\r\n$6\r\nuser-1\r\n:5\r\n"
+            )
+
+            clock.advance(5)
+
+            assert (
+                send_command(client, "SEAT_STATUS", "concert", "A-1")
+                == "*3\r\n$9\r\nAVAILABLE\r\n$-1\r\n:-1\r\n"
+            )
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_supports_ticketing_queue_flow() -> None:
+    server = MiniRedisServer(port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-1") == "*3\r\n:1\r\n:1\r\n:1\r\n"
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-2") == "*3\r\n:1\r\n:2\r\n:2\r\n"
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-1") == "*3\r\n:0\r\n:1\r\n:2\r\n"
+            assert send_command(client, "QUEUE_POSITION", "concert", "user-2") == "*2\r\n:2\r\n:2\r\n"
+            assert send_command(client, "POP_QUEUE", "concert") == "*2\r\n$6\r\nuser-1\r\n:1\r\n"
+            assert send_command(client, "QUEUE_POSITION", "concert", "user-1") == "*2\r\n:-1\r\n:1\r\n"
+            assert send_command(client, "POP_QUEUE", "concert") == "*2\r\n$6\r\nuser-2\r\n:0\r\n"
+            assert send_command(client, "POP_QUEUE", "concert") == "*2\r\n$-1\r\n:0\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_supports_queue_leave_and_peek_flow() -> None:
+    server = MiniRedisServer(port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-1") == "*3\r\n:1\r\n:1\r\n:1\r\n"
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-2") == "*3\r\n:1\r\n:2\r\n:2\r\n"
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-3") == "*3\r\n:1\r\n:3\r\n:3\r\n"
+            assert send_command(client, "PEEK_QUEUE", "concert") == "*2\r\n$6\r\nuser-1\r\n:3\r\n"
+            assert send_command(client, "LEAVE_QUEUE", "concert", "user-2") == "*3\r\n:1\r\n:2\r\n:2\r\n"
+            assert send_command(client, "LEAVE_QUEUE", "concert", "missing") == "*3\r\n:0\r\n:-1\r\n:2\r\n"
+            assert send_command(client, "QUEUE_POSITION", "concert", "user-3") == "*2\r\n:2\r\n:2\r\n"
+            assert send_command(client, "PEEK_QUEUE", "concert") == "*2\r\n$6\r\nuser-1\r\n:2\r\n"
     finally:
         server.shutdown()
         server_thread.join(timeout=2)
