@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 RESP_LINE_ENDING = "\r\n"
+RESPArrayItem = str | int | None
 
 
 def _validate_single_line(message: str) -> None:
@@ -29,6 +32,26 @@ def encode_bulk_string(message: str | None) -> str:
 def encode_integer(value: int) -> str:
     """Encode a RESP integer."""
     return f":{value}{RESP_LINE_ENDING}"
+
+
+def _encode_array_item(item: RESPArrayItem) -> str:
+    """Encode a single RESP array item using the agreed scalar mappings."""
+    if isinstance(item, bool):
+        item = int(item)
+
+    if isinstance(item, int):
+        return encode_integer(item)
+
+    if item is None or isinstance(item, str):
+        return encode_bulk_string(item)
+
+    raise TypeError("RESP array items must be str, int, or None")
+
+
+def encode_array(items: Sequence[RESPArrayItem]) -> str:
+    """Encode a RESP array of scalar values."""
+    body = "".join(_encode_array_item(item) for item in items)
+    return f"*{len(items)}{RESP_LINE_ENDING}{body}"
 
 
 def encode_error(message: str) -> str:

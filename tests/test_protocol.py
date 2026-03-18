@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from protocol.resp_encoder import (
+    encode_array,
     encode_bulk_string,
     encode_error,
     encode_integer,
@@ -90,6 +91,22 @@ def test_parse_resp_frame_reports_incomplete_request() -> None:
         parse_resp_frame(b"*2\r\n$3\r\nGET\r\n")
 
 
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"*-1\r\n", "negative RESP array length"),
+        (b"*1\r\n$-1\r\n", "null bulk strings are not supported"),
+        (b"*1\r\n$2\r\n\xff\xff\r\n", "must be valid UTF-8"),
+    ],
+)
+def test_parse_resp_rejects_unsupported_resp_variants(
+    payload: bytes,
+    message: str,
+) -> None:
+    with pytest.raises(ProtocolError, match=message):
+        parse_resp(payload)
+
+
 def test_encode_simple_string_returns_resp_simple_string() -> None:
     assert encode_simple_string("OK") == "+OK\r\n"
 
@@ -118,6 +135,27 @@ def test_encode_bulk_string_counts_utf8_bytes() -> None:
 def test_encode_integer_returns_resp_integer() -> None:
     assert encode_integer(1) == ":1\r\n"
     assert encode_integer(0) == ":0\r\n"
+
+
+def test_encode_array_returns_resp_array() -> None:
+    assert encode_array(["a", "bb"]) == "*2\r\n$1\r\na\r\n$2\r\nbb\r\n"
+
+
+def test_encode_array_supports_mixed_scalar_values() -> None:
+    assert encode_array(["a", None, 2]) == "*3\r\n$1\r\na\r\n$-1\r\n:2\r\n"
+
+
+def test_encode_array_supports_empty_arrays() -> None:
+    assert encode_array([]) == "*0\r\n"
+
+
+def test_encode_array_encodes_boolean_items_as_integers() -> None:
+    assert encode_array([True, False]) == "*2\r\n:1\r\n:0\r\n"
+
+
+def test_encode_array_rejects_unsupported_item_types() -> None:
+    with pytest.raises(TypeError, match="RESP array items must be"):
+        encode_array(["ok", {"bad": "item"}])
 
 
 def test_encode_error_returns_resp_error() -> None:

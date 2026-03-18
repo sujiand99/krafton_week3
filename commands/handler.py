@@ -6,7 +6,8 @@ from typing import Protocol, TypeAlias
 
 from commands.registry import COMMAND_ARITY, SUPPORTED_COMMANDS
 
-CommandResult: TypeAlias = str | int | None
+RESPScalar: TypeAlias = str | int | None
+CommandResult: TypeAlias = RESPScalar | list[RESPScalar]
 
 
 class CommandError(Exception):

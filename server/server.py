@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from commands.handler import handle_command
 from protocol.resp_encoder import (
+    encode_array,
     encode_bulk_string,
     encode_error,
     encode_integer,
@@ -27,6 +28,7 @@ HOST = "127.0.0.1"
 PORT = 6379
 BACKLOG = 5
 BUFFER_SIZE = 4096
+SIMPLE_STRING_COMMANDS = {"SET"}
 
 
 def _format_error_message(error: Exception) -> str:
@@ -35,30 +37,40 @@ def _format_error_message(error: Exception) -> str:
     return message.replace("\r", " ").replace("\n", " ")
 
 
+def encode_result_value(result: Any) -> str:
+    """Map a pure command result onto the matching RESP type."""
+    if isinstance(result, tuple):
+        result = list(result)
+
+    if isinstance(result, list):
+        return encode_array(result)
+
+    if isinstance(result, bool):
+        result = int(result)
+
+    if isinstance(result, int):
+        return encode_integer(result)
+
+    if result is None or isinstance(result, str):
+        return encode_bulk_string(result)
+
+    raise TypeError(
+        "Command results must be str, int, None, or a list/tuple of scalar values"
+    )
+
+
 def encode_command_result(command: list[str], result: Any) -> str:
     """Map a command result onto the RESP type agreed for that command."""
     if not command or not command[0]:
         raise ValueError("empty command")
 
     command_name = command[0].upper()
-    if command_name == "SET":
+    if command_name in SIMPLE_STRING_COMMANDS:
         if not isinstance(result, str):
-            raise TypeError("SET must return a string result")
+            raise TypeError(f"{command_name} must return a string result")
         return encode_simple_string(result)
 
-    if command_name == "GET":
-        if result is not None and not isinstance(result, str):
-            raise TypeError("GET must return a string or None")
-        return encode_bulk_string(result)
-
-    if command_name == "DEL":
-        if isinstance(result, bool):
-            result = int(result)
-        if not isinstance(result, int):
-            raise TypeError("DEL must return an integer result")
-        return encode_integer(result)
-
-    raise ValueError(f"unsupported command '{command_name}'")
+    return encode_result_value(result)
 
 
 def send_response(conn: socket.socket, addr: tuple[str, int], response: str) -> None:

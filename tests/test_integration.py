@@ -46,9 +46,41 @@ def test_encode_command_result_maps_command_types_to_resp() -> None:
     assert server_module.encode_command_result(["DEL", "a"], 1) == ":1\r\n"
 
 
-def test_encode_command_result_rejects_unsupported_command() -> None:
-    with pytest.raises(ValueError, match="unsupported command 'PING'"):
-        server_module.encode_command_result(["PING"], "PONG")
+def test_encode_command_result_supports_array_results_for_collection_reads() -> None:
+    assert (
+        server_module.encode_command_result(["LRANGE", "items", "0", "-1"], ["a", "b"])
+        == "*2\r\n$1\r\na\r\n$1\r\nb\r\n"
+    )
+    assert (
+        server_module.encode_command_result(["SMEMBERS", "myset"], ["x", "y"])
+        == "*2\r\n$1\r\nx\r\n$1\r\ny\r\n"
+    )
+
+
+def test_encode_command_result_supports_tuple_collection_results() -> None:
+    assert (
+        server_module.encode_command_result(["LRANGE", "items", "0", "-1"], ("a", "b"))
+        == "*2\r\n$1\r\na\r\n$1\r\nb\r\n"
+    )
+
+
+def test_encode_command_result_supports_empty_collection_results() -> None:
+    assert server_module.encode_command_result(["SMEMBERS", "myset"], []) == "*0\r\n"
+
+
+def test_encode_command_result_requires_string_for_simple_string_commands() -> None:
+    with pytest.raises(TypeError, match="SET must return a string result"):
+        server_module.encode_command_result(["SET", "a", "1"], 1)
+
+
+def test_encode_command_result_rejects_unsupported_result_type() -> None:
+    with pytest.raises(TypeError, match="Command results must be"):
+        server_module.encode_command_result(["HGETALL", "myhash"], {"field": "value"})
+
+
+def test_encode_result_value_rejects_unsupported_collection_items() -> None:
+    with pytest.raises(TypeError, match="RESP array items must be"):
+        server_module.encode_result_value(["ok", {"bad": "item"}])
 
 
 def test_handle_client_sends_bulk_string_for_valid_get(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +91,39 @@ def test_handle_client_sends_bulk_string_for_valid_get(monkeypatch: pytest.Monke
 
     assert conn.sent == [b"$2\r\n10\r\n"]
     assert conn.closed is True
+
+
+def test_handle_client_sends_resp_array_for_collection_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server_module, "handle_command", lambda command, storage: ["a", "b"])
+    conn = FakeConnection([b"*4\r\n$6\r\nLRANGE\r\n$5\r\nitems\r\n$1\r\n0\r\n$2\r\n-1\r\n", b""])
+
+    server_module.handle_client(conn, ("127.0.0.1", 9005), DummyStorage())
+
+    assert conn.sent == [b"*2\r\n$1\r\na\r\n$1\r\nb\r\n"]
+
+
+def test_handle_client_sends_mixed_scalar_resp_array(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server_module, "handle_command", lambda command, storage: ["a", None, 2])
+    conn = FakeConnection([b"*2\r\n$8\r\nSMEMBERS\r\n$5\r\nmyset\r\n", b""])
+
+    server_module.handle_client(conn, ("127.0.0.1", 9006), DummyStorage())
+
+    assert conn.sent == [b"*3\r\n$1\r\na\r\n$-1\r\n:2\r\n"]
+
+
+def test_handle_client_converts_result_mapping_failures_to_resp_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server_module, "handle_command", lambda command, storage: ["ok", {"bad": "item"}])
+    conn = FakeConnection([b"*2\r\n$8\r\nSMEMBERS\r\n$5\r\nmyset\r\n", b""])
+
+    server_module.handle_client(conn, ("127.0.0.1", 9007), DummyStorage())
+
+    assert conn.sent == [b"-ERR RESP array items must be str, int, or None\r\n"]
 
 
 def test_handle_client_converts_command_errors_to_resp_errors(
