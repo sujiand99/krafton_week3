@@ -75,6 +75,38 @@ def test_expire_existing_key_returns_true_and_removes_value_after_deadline() -> 
     assert storage.get("a") is None
 
 
+def test_snapshot_excludes_expired_keys() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+
+    storage.set("a", "1")
+    storage.set("b", "2")
+    assert storage.expire("b", 5) is True
+
+    clock.advance(5)
+
+    assert storage.snapshot(now=clock()) == [("a", "1", None)]
+
+
+def test_load_snapshot_restores_unexpired_entries_only() -> None:
+    clock = FakeClock(start=200.0)
+    storage = StorageEngine(clock=clock)
+
+    storage.load_snapshot(
+        [
+            ("persistent", "1", None),
+            ("volatile", "2", 210.0),
+            ("expired", "3", 150.0),
+        ],
+        now=clock(),
+    )
+
+    assert storage.get("persistent") == "1"
+    assert storage.get("volatile") == "2"
+    assert storage.get("expired") is None
+    assert storage.ttl("volatile") == 10
+
+
 def test_ttl_returns_remaining_seconds_for_volatile_key() -> None:
     clock = FakeClock()
     storage = StorageEngine(clock=clock)

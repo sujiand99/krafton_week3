@@ -9,3 +9,5 @@ htmlcov/
 venv/
 .idea/
 .vscode/
+.test_tmp/
+data/*.db

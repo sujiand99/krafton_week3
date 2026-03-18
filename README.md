@@ -30,6 +30,7 @@ mini-redis/
 |- storage/
 |  |- engine.py
 |  |- hash_table.py
+|  |- sqlite_store.py
 |  `- ttl.py
 |- client/
 |  `- client.py
@@ -69,6 +70,19 @@ expire(key: str, seconds: int, option: str | None = None) -> bool
 ttl(key: str) -> int
 ```
 
+### Redis/DB 책임 분리
+
+- 티켓팅 시연 기준으로 Redis는 빠르게 변하는 좌석 홀드, TTL, 대기열, 중복 요청 방지를 담당합니다.
+- 최종 예약, 결제 결과, 사용자/좌석/이벤트 같은 영속 데이터는 별도 DB가 source of truth가 됩니다.
+- 따라서 Redis 서버는 기본적으로 메모리 기반으로 동작하고, 최종 예약을 기본 저장소로 삼지 않습니다.
+- SQLite snapshot 기능은 필요할 때만 `--db-path`로 켜는 선택 기능이며, 로컬 복구/실험용 보조 수단으로만 취급합니다.
+
+서버 실행 시 옵션:
+
+```bash
+python server/server.py --db-path data/mini_redis.db --snapshot-interval 5
+```
+
 ### Parser 출력
 
 ```python
@@ -101,6 +115,7 @@ None
 - `TTL key` -> `int`
 - 현재 지원 범위는 `SET`, `GET`, `DEL`, `EXPIRE`, `TTL`
 - `PING`, `PERSIST`, `RENAME`은 아직 지원하지 않음
+- 티켓팅 도메인 명령(`RESERVE_SEAT`, `CONFIRM_SEAT`, `RELEASE_SEAT`, `SEAT_STATUS`, `JOIN_QUEUE`, `QUEUE_POSITION`)은 아직 미구현입니다.
 
 ### TTL 동작 요약
 
@@ -157,5 +172,6 @@ except CommandError as exc:
 ## 테스트 상태
 
 - storage, command, integration 테스트에 EXPIRE 및 TTL 시나리오가 추가되어 있습니다.
+- 선택적 SQLite snapshot 저장/복원 테스트가 포함되어 있습니다.
 - fake clock을 주입해 `sleep` 없이 만료 전후 동작을 검증합니다.
 - 현재 테스트 기준으로 `SET -> EXPIRE -> GET`, 옵션별 `NX/XX/GT/LT`, `seconds <= 0` 즉시 삭제가 모두 검증됩니다.

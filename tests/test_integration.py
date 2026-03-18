@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import socket
 import threading
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -63,6 +65,10 @@ def encode_command(*tokens: str) -> bytes:
 def send_command(client: socket.socket, *tokens: str) -> str:
     client.sendall(encode_command(*tokens))
     return client.recv(1024).decode("utf-8")
+
+
+def make_db_path() -> Path:
+    return Path(".test_tmp") / f"{uuid4().hex}.db"
 
 
 def test_encode_command_result_maps_command_types_to_resp() -> None:
@@ -226,7 +232,7 @@ def test_handle_client_processes_multiple_commands_from_one_buffer(
 
 
 def test_server_processes_multiple_requests_on_one_connection() -> None:
-    server = MiniRedisServer(port=0)
+    server = MiniRedisServer(port=0, db_path=None)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
@@ -253,7 +259,7 @@ def test_server_processes_multiple_requests_on_one_connection() -> None:
 def test_server_expires_keys_after_deadline_using_injected_clock() -> None:
     clock = FakeClock()
     storage = StorageEngine(clock=clock)
-    server = MiniRedisServer(port=0, storage=storage)
+    server = MiniRedisServer(port=0, storage=storage, db_path=None, clock=clock)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
@@ -276,7 +282,7 @@ def test_server_expires_keys_after_deadline_using_injected_clock() -> None:
 def test_server_applies_expire_options_over_resp() -> None:
     clock = FakeClock()
     storage = StorageEngine(clock=clock)
-    server = MiniRedisServer(port=0, storage=storage)
+    server = MiniRedisServer(port=0, storage=storage, db_path=None, clock=clock)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
@@ -302,7 +308,7 @@ def test_server_applies_expire_options_over_resp() -> None:
 
 def test_server_deletes_key_immediately_for_non_positive_expire() -> None:
     storage = StorageEngine(clock=FakeClock())
-    server = MiniRedisServer(port=0, storage=storage)
+    server = MiniRedisServer(port=0, storage=storage, db_path=None)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
@@ -321,7 +327,7 @@ def test_server_deletes_key_immediately_for_non_positive_expire() -> None:
 def test_server_returns_ttl_over_resp() -> None:
     clock = FakeClock()
     storage = StorageEngine(clock=clock)
-    server = MiniRedisServer(port=0, storage=storage)
+    server = MiniRedisServer(port=0, storage=storage, db_path=None, clock=clock)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
@@ -345,8 +351,92 @@ def test_server_returns_ttl_over_resp() -> None:
     finally:
         server.shutdown()
         server_thread.join(timeout=2)
+
+
+def test_server_restores_values_from_sqlite_after_restart() -> None:
+    db_path = make_db_path()
+
+    try:
+        first_server = MiniRedisServer(port=0, db_path=db_path)
+        first_thread = threading.Thread(target=first_server.serve_forever, daemon=True)
+        first_thread.start()
+        host, port = first_server.wait_until_started()
+
+        try:
+            with socket.create_connection((host, port), timeout=2) as client:
+                assert send_command(client, "SET", "ticket:1", "available") == "+OK\r\n"
+        finally:
+            first_server.shutdown()
+            first_thread.join(timeout=2)
+
+        second_server = MiniRedisServer(port=0, db_path=db_path)
+        second_thread = threading.Thread(target=second_server.serve_forever, daemon=True)
+        second_thread.start()
+        host, port = second_server.wait_until_started()
+
+        try:
+            with socket.create_connection((host, port), timeout=2) as client:
+                assert send_command(client, "GET", "ticket:1") == "$9\r\navailable\r\n"
+        finally:
+            second_server.shutdown()
+            second_thread.join(timeout=2)
+    finally:
+        db_path.unlink(missing_ok=True)
+
+
+def test_server_restores_ttl_from_sqlite_after_restart() -> None:
+    db_path = make_db_path()
+    clock = FakeClock(start=1000.0)
+
+    try:
+        first_storage = StorageEngine(clock=clock)
+        first_server = MiniRedisServer(
+            port=0,
+            storage=first_storage,
+            db_path=db_path,
+            clock=clock,
+        )
+        first_thread = threading.Thread(target=first_server.serve_forever, daemon=True)
+        first_thread.start()
+        host, port = first_server.wait_until_started()
+
+        try:
+            with socket.create_connection((host, port), timeout=2) as client:
+                assert send_command(client, "SET", "hold:1", "user-a") == "+OK\r\n"
+                assert send_command(client, "EXPIRE", "hold:1", "10") == ":1\r\n"
+        finally:
+            first_server.shutdown()
+            first_thread.join(timeout=2)
+
+        clock.advance(4)
+
+        second_storage = StorageEngine(clock=clock)
+        second_server = MiniRedisServer(
+            port=0,
+            storage=second_storage,
+            db_path=db_path,
+            clock=clock,
+        )
+        second_thread = threading.Thread(target=second_server.serve_forever, daemon=True)
+        second_thread.start()
+        host, port = second_server.wait_until_started()
+
+        try:
+            with socket.create_connection((host, port), timeout=2) as client:
+                assert send_command(client, "TTL", "hold:1") == ":6\r\n"
+
+                clock.advance(6)
+
+                assert send_command(client, "GET", "hold:1") == "$-1\r\n"
+        finally:
+            second_server.shutdown()
+            second_thread.join(timeout=2)
+    finally:
+        db_path.unlink(missing_ok=True)
+
+
 def test_server_returns_errors_without_dropping_valid_connection_flow() -> None:
-    server = MiniRedisServer(port=0)
+    server = MiniRedisServer(port=0, db_path=None)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
