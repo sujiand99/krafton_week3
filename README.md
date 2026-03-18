@@ -1,9 +1,11 @@
 # Mini Redis
 
-Mini Redis는 Python으로 만든 작은 Redis 스타일의 in-memory key-value 서버입니다.
-현재 구현은 RESP 프로토콜을 사용하고, 여러 클라이언트 접속을 허용하지만 명령 실행은 single worker가 순차 처리합니다.
+Mini Redis는 Python으로 만든 작은 Redis 스타일의 in-memory 서버입니다.
+현재 구현은 RESP 프로토콜을 사용하고, 여러 클라이언트 연결을 받을 수 있지만 실제 명령 실행은 single worker가 순차 처리합니다.
 
-## 현재 지원 기능
+## 현재 구현 범위
+
+기본 command:
 
 - `SET key value`
 - `GET key`
@@ -11,7 +13,19 @@ Mini Redis는 Python으로 만든 작은 Redis 스타일의 in-memory key-value 
 - `EXPIRE key seconds [NX | XX | GT | LT]`
 - `TTL key`
 
-## 현재 아키텍처
+티켓팅용 command:
+
+- `RESERVE_SEAT event_id seat_id user_id ttl_seconds`
+- `CONFIRM_SEAT event_id seat_id user_id`
+- `RELEASE_SEAT event_id seat_id user_id`
+- `SEAT_STATUS event_id seat_id`
+- `JOIN_QUEUE event_id user_id`
+- `QUEUE_POSITION event_id user_id`
+- `POP_QUEUE event_id`
+- `LEAVE_QUEUE event_id user_id`
+- `PEEK_QUEUE event_id`
+
+## 아키텍처
 
 ```text
 App Server / Client
@@ -29,82 +43,15 @@ Command Handler
 StorageEngine (dict[str, Entry])
 ```
 
-## 구성 요소 설명
+핵심 포인트:
 
-### 1. App Server / Client
+- 클라이언트 연결은 여러 개 받을 수 있습니다.
+- command 실행은 `SerialCommandExecutor` 한 곳에서만 수행됩니다.
+- race condition을 storage lock보다 실행 모델로 줄이는 구조입니다.
 
-이 저장소에 별도 웹 애플리케이션 서버가 있는 것은 아닙니다.
-여기서 App Server는 Mini Redis에 TCP 요청을 보내는 외부 애플리케이션 또는 테스트 클라이언트를 뜻합니다.
-
-역할:
-
-- TCP 연결 생성
-- RESP 형식으로 명령 전송
-- RESP 응답 수신
-
-### 2. Mini Redis Server
-
-`server/server.py`의 `MiniRedisServer`가 TCP 서버입니다.
-
-역할:
-
-- 여러 클라이언트 연결 수락
-- 클라이언트별 소켓 읽기 처리
-- RESP 요청 파싱
-- 파싱된 명령을 worker queue에 전달
-- worker 결과를 RESP 응답으로 인코딩해 반환
-
-특징:
-
-- 연결은 동시에 여러 개 받을 수 있습니다.
-- 명령 실행은 worker 하나가 순차 처리합니다.
-
-### 3. Worker
-
-`server/executor.py`의 `SerialCommandExecutor`가 단일 worker 역할을 합니다.
-
-역할:
-
-- 클라이언트 스레드가 넣은 명령을 queue에서 하나씩 꺼냄
-- `handle_command(...)`를 worker 하나에서만 실행
-- 결과 또는 예외를 요청한 클라이언트 처리 흐름으로 돌려줌
-
-의도:
-
-- Redis의 single-threaded command execution 모델에 가깝게 동작
-- storage 레이어에 별도 read/write lock을 두지 않고도 실행 순서를 직렬화
-- 여러 클라이언트가 동시에 요청해도 race condition 가능성을 줄임
-
-### 4. Command Layer
-
-`commands/handler.py`
-
-역할:
-
-- 명령어 이름 검증
-- 인자 개수 검증
-- storage API 호출
-- 순수 결과 반환
-
-반환 예:
-
-```python
-"OK"
-"123"
-None
-1
-0
--1
--2
-```
-
-RESP 문자열 생성은 command layer가 아니라 server/protocol layer가 담당합니다.
-
-### 5. Storage Layer
+## 저장 구조
 
 `storage/engine.py`
-
-현재 저장 구조:
 
 ```python
 @dataclass(slots=True)
@@ -113,58 +60,102 @@ class Entry:
     expires_at: float | None = None
 ```
 
-실제 저장소:
+- 일반 key-value 값과 TTL 메타데이터를 함께 관리합니다.
+- 티켓팅 seat 상태와 queue도 storage 안에서 관리합니다.
+- 만료는 background worker 없이 lazy expiration 방식입니다.
 
-```python
-dict[str, Entry]
-```
+## 티켓팅 상태 모델
+
+seat 상태:
+
+- `AVAILABLE`
+- `HELD`
+- `CONFIRMED`
 
 의미:
 
-- 값과 TTL 메타데이터를 한 구조에 함께 보관
-- 추후 TTL 관련 기능 확장을 쉽게 하기 위한 구조
-- 현재는 single worker가 storage를 소유한다고 가정
+- `AVAILABLE`: 아직 누구도 선점하지 않은 좌석
+- `HELD`: 특정 유저가 TTL과 함께 임시 선점한 좌석
+- `CONFIRMED`: 최종 확정된 좌석
 
-## 요청 처리 흐름
+## 티켓팅 command 요약
 
-1. 클라이언트가 TCP로 서버에 연결합니다.
-2. RESP 요청을 보냅니다.
-3. `MiniRedisServer`가 요청을 읽고 RESP 프레임으로 파싱합니다.
-4. 파싱된 명령을 `SerialCommandExecutor` queue에 넣습니다.
-5. worker가 명령을 하나 꺼내 `handle_command(...)`를 실행합니다.
-6. `StorageEngine`이 값을 읽거나 수정합니다.
-7. 결과를 RESP 응답으로 인코딩해 클라이언트에 돌려줍니다.
+### Seat
 
-## Storage 인터페이스
+`RESERVE_SEAT event_id seat_id user_id ttl_seconds`
 
-```python
-set(key: str, value: str) -> None
-get(key: str) -> str | None
-delete(key: str) -> bool
-expire(key: str, seconds: int, option: str | None = None) -> bool
-ttl(key: str) -> int
-```
+- 좌석이 비어 있으면 hold 생성
+- 같은 유저가 다시 요청하면 hold TTL 갱신
+- 다른 유저가 이미 hold 또는 confirm 상태면 실패
+- 반환: `[success, state, user_id, ttl]`
 
-## TTL 동작
+`CONFIRM_SEAT event_id seat_id user_id`
 
-- TTL은 `Entry.expires_at`에 저장됩니다.
-- 만료 정리는 background sweeper가 아니라 key 접근 시점의 lazy expiration 방식입니다.
-- `SET`은 기존 TTL을 제거하고 persistent key로 다시 저장합니다.
-- `DEL`은 값과 TTL 메타데이터를 함께 제거합니다.
-- `TTL` 반환 규칙:
-  - key 없음 -> `-2`
-  - key는 있지만 TTL 없음 -> `-1`
-  - key가 살아 있으면 남은 초 반환
+- 해당 유저가 hold 중인 좌석을 confirmed로 전환
+- 같은 유저의 중복 confirm은 idempotent하게 성공 처리
+- 반환: `[success, state, user_id, ttl]`
+
+`RELEASE_SEAT event_id seat_id user_id`
+
+- 해당 유저가 hold 중인 좌석을 해제
+- 반환: `[success, state, user_id, ttl]`
+
+`SEAT_STATUS event_id seat_id`
+
+- 현재 좌석 상태 조회
+- 반환: `[state, user_id, ttl]`
+
+### Queue
+
+`JOIN_QUEUE event_id user_id`
+
+- 대기열 맨 뒤에 유저 추가
+- 이미 들어가 있으면 중복 삽입하지 않고 기존 위치 반환
+- 반환: `[joined_flag, position, queue_length]`
+
+`QUEUE_POSITION event_id user_id`
+
+- 현재 유저의 대기 순번 조회
+- 없으면 position은 `-1`
+- 반환: `[position, queue_length]`
+
+`POP_QUEUE event_id`
+
+- 맨 앞 유저를 꺼냄
+- 반환: `[user_id_or_nil, remaining_length]`
+
+`LEAVE_QUEUE event_id user_id`
+
+- 특정 유저를 대기열에서 제거
+- 반환: `[removed_flag, old_position, queue_length]`
+
+`PEEK_QUEUE event_id`
+
+- 맨 앞 유저를 제거하지 않고 확인
+- 반환: `[user_id_or_nil, queue_length]`
+
+상세 요청/응답 예시는 [docs/ticketing-command-spec.md](C:\Users\haeli\Documents\codex_project7\krafton_week3\docs\ticketing-command-spec.md)에 정리했습니다.
+
+## DB 연동 경계
+
+Redis와 DB 책임 분리는 [docs/db-handoff.md](C:\Users\haeli\Documents\codex_project7\krafton_week3\docs\db-handoff.md)에 정리했습니다.
+
+권장 흐름:
+
+1. Redis `RESERVE_SEAT`
+2. 앱 서버에서 결제/DB 처리
+3. 성공 시 Redis `CONFIRM_SEAT`
+4. 실패 시 Redis `RELEASE_SEAT`
 
 ## 프로젝트 구조
 
 ```text
 mini-redis/
 |- README.md
-|- .gitignore
 |- docs/
 |  |- architecture.md
-|  `- meeting-notes.md
+|  |- db-handoff.md
+|  `- ticketing-command-spec.md
 |- server/
 |  |- executor.py
 |  `- server.py
@@ -178,8 +169,6 @@ mini-redis/
 |  |- engine.py
 |  |- hash_table.py
 |  `- ttl.py
-|- client/
-|  `- client.py
 `- tests/
    |- test_commands.py
    |- test_executor.py
@@ -190,24 +179,16 @@ mini-redis/
 
 ## 실행
 
-서버 실행:
-
 ```bash
 py -3.12 server/server.py
 ```
 
 ## 테스트
 
-전체 테스트 실행:
-
 ```bash
 py -3.12 -m pytest -q
 ```
 
-현재 테스트 범위:
+현재 기준 테스트 결과:
 
-- protocol 파싱/인코딩
-- command 처리
-- storage 및 TTL 동작
-- executor 단일 worker 직렬화
-- 여러 클라이언트 동시 접속 integration
+- `111 passed`

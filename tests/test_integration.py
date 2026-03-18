@@ -465,3 +465,108 @@ def test_server_serializes_commands_from_multiple_clients() -> None:
     finally:
         server.shutdown()
         server_thread.join(timeout=2)
+
+
+def test_server_supports_ticketing_seat_flow() -> None:
+    server = MiniRedisServer(port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert (
+                send_command(client, "SEAT_STATUS", "concert", "A-1")
+                == "*3\r\n$9\r\nAVAILABLE\r\n$-1\r\n:-1\r\n"
+            )
+            assert (
+                send_command(client, "RESERVE_SEAT", "concert", "A-1", "user-1", "30")
+                == "*4\r\n:1\r\n$4\r\nHELD\r\n$6\r\nuser-1\r\n:30\r\n"
+            )
+            assert (
+                send_command(client, "RESERVE_SEAT", "concert", "A-1", "user-2", "30")
+                == "*4\r\n:0\r\n$4\r\nHELD\r\n$6\r\nuser-1\r\n:30\r\n"
+            )
+            assert (
+                send_command(client, "CONFIRM_SEAT", "concert", "A-1", "user-1")
+                == "*4\r\n:1\r\n$9\r\nCONFIRMED\r\n$6\r\nuser-1\r\n:-1\r\n"
+            )
+            assert (
+                send_command(client, "SEAT_STATUS", "concert", "A-1")
+                == "*3\r\n$9\r\nCONFIRMED\r\n$6\r\nuser-1\r\n:-1\r\n"
+            )
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_releases_hold_after_ticketing_seat_ttl_expires() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+    server = MiniRedisServer(port=0, storage=storage)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert (
+                send_command(client, "RESERVE_SEAT", "concert", "A-1", "user-1", "5")
+                == "*4\r\n:1\r\n$4\r\nHELD\r\n$6\r\nuser-1\r\n:5\r\n"
+            )
+
+            clock.advance(5)
+
+            assert (
+                send_command(client, "SEAT_STATUS", "concert", "A-1")
+                == "*3\r\n$9\r\nAVAILABLE\r\n$-1\r\n:-1\r\n"
+            )
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_supports_ticketing_queue_flow() -> None:
+    server = MiniRedisServer(port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-1") == "*3\r\n:1\r\n:1\r\n:1\r\n"
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-2") == "*3\r\n:1\r\n:2\r\n:2\r\n"
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-1") == "*3\r\n:0\r\n:1\r\n:2\r\n"
+            assert send_command(client, "QUEUE_POSITION", "concert", "user-2") == "*2\r\n:2\r\n:2\r\n"
+            assert send_command(client, "POP_QUEUE", "concert") == "*2\r\n$6\r\nuser-1\r\n:1\r\n"
+            assert send_command(client, "QUEUE_POSITION", "concert", "user-1") == "*2\r\n:-1\r\n:1\r\n"
+            assert send_command(client, "POP_QUEUE", "concert") == "*2\r\n$6\r\nuser-2\r\n:0\r\n"
+            assert send_command(client, "POP_QUEUE", "concert") == "*2\r\n$-1\r\n:0\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
+
+
+def test_server_supports_queue_leave_and_peek_flow() -> None:
+    server = MiniRedisServer(port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.wait_until_started()
+
+    try:
+        with socket.create_connection((host, port), timeout=2) as client:
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-1") == "*3\r\n:1\r\n:1\r\n:1\r\n"
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-2") == "*3\r\n:1\r\n:2\r\n:2\r\n"
+            assert send_command(client, "JOIN_QUEUE", "concert", "user-3") == "*3\r\n:1\r\n:3\r\n:3\r\n"
+            assert send_command(client, "PEEK_QUEUE", "concert") == "*2\r\n$6\r\nuser-1\r\n:3\r\n"
+            assert send_command(client, "LEAVE_QUEUE", "concert", "user-2") == "*3\r\n:1\r\n:2\r\n:2\r\n"
+            assert send_command(client, "LEAVE_QUEUE", "concert", "missing") == "*3\r\n:0\r\n:-1\r\n:2\r\n"
+            assert send_command(client, "QUEUE_POSITION", "concert", "user-3") == "*2\r\n:2\r\n:2\r\n"
+            assert send_command(client, "PEEK_QUEUE", "concert") == "*2\r\n$6\r\nuser-1\r\n:2\r\n"
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=2)
