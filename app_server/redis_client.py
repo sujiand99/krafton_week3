@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import socket
+import threading
 from typing import TypeAlias
 
 from app_server.exceptions import ConflictError, UpstreamError
@@ -140,14 +141,27 @@ class RedisRESPClient:
         self._host = host
         self._port = port
         self._timeout = timeout
+        self._connection: socket.socket | None = None
+        self._connection_lock = threading.RLock()
+
+    def close(self) -> None:
+        with self._connection_lock:
+            self._close_connection()
 
     def execute(self, *tokens: str) -> RESPReply:
         request = self._encode_command(tokens)
 
         try:
-            with socket.create_connection((self._host, self._port), timeout=self._timeout) as conn:
-                conn.sendall(request)
-                return self._read_reply(conn)
+            with self._connection_lock:
+                conn = self._ensure_connection()
+                try:
+                    conn.sendall(request)
+                    return self._read_reply(conn)
+                except OSError:
+                    self._close_connection()
+                    conn = self._ensure_connection()
+                    conn.sendall(request)
+                    return self._read_reply(conn)
         except ConflictError:
             raise
         except OSError as exc:
@@ -257,6 +271,7 @@ class RedisRESPClient:
         while True:
             chunk = conn.recv(4096)
             if not chunk:
+                self._close_connection()
                 raise UpstreamError("Redis closed the connection before replying")
 
             buffer.extend(chunk)
@@ -268,6 +283,26 @@ class RedisRESPClient:
             if consumed != len(buffer):
                 raise UpstreamError("Redis reply contained unexpected trailing data")
             return value
+
+    def _ensure_connection(self) -> socket.socket:
+        if self._connection is not None:
+            return self._connection
+
+        conn = socket.create_connection((self._host, self._port), timeout=self._timeout)
+        conn.settimeout(self._timeout)
+        self._connection = conn
+        return conn
+
+    def _close_connection(self) -> None:
+        if self._connection is None:
+            return
+
+        try:
+            self._connection.close()
+        except OSError:
+            pass
+        finally:
+            self._connection = None
 
     @staticmethod
     def _expect_array(value: RESPReply, length: int) -> list[RESPReply]:

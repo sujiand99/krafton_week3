@@ -3,10 +3,10 @@
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
-$python = if (Get-Command python -ErrorAction SilentlyContinue) {
-    (Get-Command python).Source
-} elseif (Test-Path $venvPython) {
+$python = if (Test-Path $venvPython) {
     $venvPython
+} elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    (Get-Command python).Source
 } else {
     throw "Python was not found. Activate .venv or install Python first."
 }
