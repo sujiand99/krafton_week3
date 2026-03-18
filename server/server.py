@@ -51,11 +51,11 @@ def encode_command_result(command: list[str], result: Any) -> str:
             raise TypeError("GET must return a string or None")
         return encode_bulk_string(result)
 
-    if command_name == "DEL":
+    if command_name in {"DEL", "EXPIRE", "TTL"}:
         if isinstance(result, bool):
             result = int(result)
         if not isinstance(result, int):
-            raise TypeError("DEL must return an integer result")
+            raise TypeError(f"{command_name} must return an integer result")
         return encode_integer(result)
 
     raise ValueError(f"unsupported command '{command_name}'")
@@ -125,10 +125,15 @@ def handle_client(
 
 
 class MiniRedisServer:
-    def __init__(self, host: str = HOST, port: int = PORT) -> None:
+    def __init__(
+        self,
+        host: str = HOST,
+        port: int = PORT,
+        storage: StorageEngine | None = None,
+    ) -> None:
         self._host = host
         self._port = port
-        self._storage = StorageEngine()
+        self._storage = storage or StorageEngine()
         self._shutdown_event = threading.Event()
         self._started_event = threading.Event()
         self._server_socket: socket.socket | None = None
