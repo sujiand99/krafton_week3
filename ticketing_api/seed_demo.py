@@ -11,6 +11,9 @@ from ticketing_api.service import TicketingService
 
 
 def seed_demo_data(db_path: str | Path = DEFAULT_DB_PATH) -> None:
+    db_path = Path(db_path)
+    db_path.unlink(missing_ok=True)
+
     service = TicketingService(TicketingRepository(SQLiteDatabase(db_path)))
     service.initialize()
     service.seed_demo_data()

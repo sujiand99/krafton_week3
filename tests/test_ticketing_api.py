@@ -67,6 +67,48 @@ def test_seed_demo_data_populates_events_and_seats() -> None:
         cleanup_db_path(db_path)
 
 
+def test_seed_demo_data_resets_existing_db_state() -> None:
+    db_path = make_db_path()
+
+    try:
+        seed_demo_data(db_path)
+        with closing(SQLiteDatabase(db_path).connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO seats (
+                    event_id,
+                    seat_id,
+                    seat_label,
+                    section,
+                    row_label,
+                    seat_number,
+                    price,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    DEMO_EVENT_ID,
+                    "Z99",
+                    "Z99",
+                    "FLOOR",
+                    "Z",
+                    99,
+                    999999,
+                    "2026-03-19T00:00:00+00:00",
+                ),
+            )
+            conn.commit()
+
+        seed_demo_data(db_path)
+        repository = TicketingRepository(SQLiteDatabase(db_path))
+        seats = repository.list_seats(DEMO_EVENT_ID)
+
+        assert len(seats) == DEMO_SEAT_COUNT
+        assert all(seat["seat_id"] != "Z99" for seat in seats)
+    finally:
+        cleanup_db_path(db_path)
+
+
 def test_create_held_reservation_and_idempotent_retry() -> None:
     db_path = make_db_path()
     seed_demo_data(db_path)

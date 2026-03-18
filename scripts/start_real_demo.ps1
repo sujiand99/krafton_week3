@@ -65,6 +65,9 @@ Set-Location '$repoRoot\frontend'
 & '$npm' run dev -- --host 127.0.0.1
 "@
 
+Write-Host "Resetting demo ticketing DB..." -ForegroundColor Yellow
+& $python -m ticketing_api.seed_demo --db-path data/ticketing.db
+
 Start-RealWindow -Title "Mini Redis" -Command $redisCommand
 Start-Sleep -Milliseconds 500
 Start-RealWindow -Title "Ticketing DB API" -Command $dbCommand
