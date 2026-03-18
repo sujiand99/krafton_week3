@@ -1,4 +1,4 @@
-"""TCP server entrypoint for the Mini Redis project."""
+﻿"""TCP server entrypoint for the Mini Redis project."""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ import argparse
 import socket
 import sys
 import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -24,12 +25,15 @@ from protocol.resp_encoder import (
 from protocol.resp_parser import IncompleteRESPError, ProtocolError, parse_resp_frame
 from server.executor import SerialCommandExecutor
 from storage.engine import StorageEngine
+from storage.sqlite_store import SQLiteSnapshotStore
 
 HOST = "127.0.0.1"
 PORT = 6379
 BACKLOG = 5
 BUFFER_SIZE = 4096
 SIMPLE_STRING_COMMANDS = {"SET"}
+DEFAULT_DB_PATH: Path | None = None
+DEFAULT_SNAPSHOT_INTERVAL = 5.0
 
 
 def _format_error_message(error: Exception) -> str:
@@ -156,10 +160,21 @@ class MiniRedisServer:
         host: str = HOST,
         port: int = PORT,
         storage: StorageEngine | None = None,
+        db_path: str | Path | None = DEFAULT_DB_PATH,
+        snapshot_interval: float = DEFAULT_SNAPSHOT_INTERVAL,
+        clock: Callable[[], float] | None = None,
     ) -> None:
+        if snapshot_interval <= 0:
+            raise ValueError("snapshot interval must be greater than zero")
+
         self._host = host
         self._port = port
-        self._storage = storage or StorageEngine()
+        self._storage = storage or StorageEngine(clock=clock)
+        self._clock = clock or getattr(self._storage, "_clock", time.time)
+        self._snapshot_store = (
+            SQLiteSnapshotStore(db_path) if db_path is not None else None
+        )
+        self._snapshot_interval = snapshot_interval
         self._executor = SerialCommandExecutor(
             storage=self._storage,
             command_handler=handle_command,
@@ -169,6 +184,7 @@ class MiniRedisServer:
         self._server_socket: socket.socket | None = None
         self._client_threads: set[threading.Thread] = set()
         self._client_threads_lock = threading.Lock()
+        self._snapshot_thread: threading.Thread | None = None
         self._bound_address = (host, port)
 
     @property
@@ -176,6 +192,18 @@ class MiniRedisServer:
         return self._bound_address
 
     def serve_forever(self) -> None:
+        if self._snapshot_store is not None:
+            self._snapshot_store.initialize()
+            self._storage.load_snapshot(
+                self._snapshot_store.load_entries(),
+                now=self._clock(),
+            )
+            self._snapshot_thread = threading.Thread(
+                target=self._run_snapshot_loop,
+                daemon=True,
+            )
+            self._snapshot_thread.start()
+
         self._executor.start()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -212,6 +240,8 @@ class MiniRedisServer:
                 self._server_socket = None
                 self._started_event.set()
                 self._join_client_threads()
+                self._flush_snapshot()
+                self._join_snapshot_thread()
                 self._executor.stop()
 
     def wait_until_started(self, timeout: float = 2.0) -> tuple[str, int]:
@@ -227,7 +257,11 @@ class MiniRedisServer:
             except OSError:
                 pass
 
-    def _run_client(self, client_socket: socket.socket, client_address: tuple[str, int]) -> None:
+    def _run_client(
+        self,
+        client_socket: socket.socket,
+        client_address: tuple[str, int],
+    ) -> None:
         try:
             handle_client(
                 client_socket,
@@ -248,6 +282,24 @@ class MiniRedisServer:
         for client_thread in client_threads:
             client_thread.join(timeout=0.5)
 
+    def _run_snapshot_loop(self) -> None:
+        while not self._shutdown_event.wait(self._snapshot_interval):
+            self._flush_snapshot()
+
+    def _flush_snapshot(self) -> None:
+        if self._snapshot_store is None:
+            return
+
+        try:
+            entries = self._storage.snapshot(now=self._clock())
+            self._snapshot_store.save_entries(entries)
+        except Exception as exc:
+            print(f"[snapshot-error] {exc}")
+
+    def _join_snapshot_thread(self) -> None:
+        if self._snapshot_thread is not None:
+            self._snapshot_thread.join(timeout=0.5)
+
 
 def serve(host: str = HOST, port: int = PORT) -> None:
     MiniRedisServer(host=host, port=port).serve_forever()
@@ -258,10 +310,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Mini Redis MVP server")
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
+    parser.add_argument("--snapshot-interval", type=float, default=DEFAULT_SNAPSHOT_INTERVAL)
     args = parser.parse_args()
 
     try:
-        serve(host=args.host, port=args.port)
+        MiniRedisServer(
+            host=args.host,
+            port=args.port,
+            db_path=args.db_path,
+            snapshot_interval=args.snapshot_interval,
+        ).serve_forever()
     except KeyboardInterrupt:
         print("\nServer stopped.")
 

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from storage.engine import Entry, StorageEngine
+from storage.engine import (
+    Entry,
+    SEAT_AVAILABLE,
+    SEAT_CONFIRMED,
+    SEAT_HELD,
+    SeatStatus,
+    StorageEngine,
+)
 
 
 class FakeClock:
@@ -82,6 +89,38 @@ def test_expire_existing_key_returns_true_and_removes_value_after_deadline() -> 
     clock.advance(5)
 
     assert storage.get("a") is None
+
+
+def test_snapshot_excludes_expired_keys() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+
+    storage.set("a", "1")
+    storage.set("b", "2")
+    assert storage.expire("b", 5) is True
+
+    clock.advance(5)
+
+    assert storage.snapshot(now=clock()) == [("a", "1", None)]
+
+
+def test_load_snapshot_restores_unexpired_entries_only() -> None:
+    clock = FakeClock(start=200.0)
+    storage = StorageEngine(clock=clock)
+
+    storage.load_snapshot(
+        [
+            ("persistent", "1", None),
+            ("volatile", "2", 210.0),
+            ("expired", "3", 150.0),
+        ],
+        now=clock(),
+    )
+
+    assert storage.get("persistent") == "1"
+    assert storage.get("volatile") == "2"
+    assert storage.get("expired") is None
+    assert storage.ttl("volatile") == 10
 
 
 def test_ttl_returns_remaining_seconds_for_volatile_key() -> None:
@@ -201,3 +240,143 @@ def test_expire_with_non_positive_seconds_deletes_immediately(seconds: int) -> N
 
     assert storage.expire("a", seconds) is True
     assert storage.get("a") is None
+
+
+def test_reserve_seat_holds_available_seat_with_ttl() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+
+    success, status = storage.reserve_seat("concert", "A-1", "user-1", 30)
+
+    assert success is True
+    assert status == SeatStatus(SEAT_HELD, "user-1", 30)
+    assert storage.seat_status("concert", "A-1") == SeatStatus(SEAT_HELD, "user-1", 30)
+
+
+def test_reserve_seat_returns_existing_hold_for_different_user() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+    storage.reserve_seat("concert", "A-1", "user-1", 30)
+    clock.advance(5)
+
+    success, status = storage.reserve_seat("concert", "A-1", "user-2", 30)
+
+    assert success is False
+    assert status == SeatStatus(SEAT_HELD, "user-1", 25)
+
+
+def test_reserve_seat_refreshes_ttl_for_same_user() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+    storage.reserve_seat("concert", "A-1", "user-1", 30)
+    clock.advance(12)
+
+    success, status = storage.reserve_seat("concert", "A-1", "user-1", 20)
+
+    assert success is True
+    assert status == SeatStatus(SEAT_HELD, "user-1", 20)
+
+
+def test_confirm_seat_marks_held_seat_as_confirmed() -> None:
+    storage = StorageEngine()
+    storage.reserve_seat("concert", "A-1", "user-1", 30)
+
+    success, status = storage.confirm_seat("concert", "A-1", "user-1")
+
+    assert success is True
+    assert status == SeatStatus(SEAT_CONFIRMED, "user-1", -1)
+    assert storage.seat_status("concert", "A-1") == SeatStatus(
+        SEAT_CONFIRMED,
+        "user-1",
+        -1,
+    )
+
+
+def test_confirm_seat_is_idempotent_for_same_user() -> None:
+    storage = StorageEngine()
+    storage.reserve_seat("concert", "A-1", "user-1", 30)
+    storage.confirm_seat("concert", "A-1", "user-1")
+
+    success, status = storage.confirm_seat("concert", "A-1", "user-1")
+
+    assert success is True
+    assert status == SeatStatus(SEAT_CONFIRMED, "user-1", -1)
+
+
+def test_release_seat_returns_available_after_matching_hold() -> None:
+    storage = StorageEngine()
+    storage.reserve_seat("concert", "A-1", "user-1", 30)
+
+    success, status = storage.release_seat("concert", "A-1", "user-1")
+
+    assert success is True
+    assert status == SeatStatus(SEAT_AVAILABLE, None, -1)
+    assert storage.seat_status("concert", "A-1") == SeatStatus(SEAT_AVAILABLE, None, -1)
+
+
+def test_release_seat_fails_for_different_user() -> None:
+    storage = StorageEngine()
+    storage.reserve_seat("concert", "A-1", "user-1", 30)
+
+    success, status = storage.release_seat("concert", "A-1", "user-2")
+
+    assert success is False
+    assert status == SeatStatus(SEAT_HELD, "user-1", 30)
+
+
+def test_seat_status_returns_available_after_hold_expiration() -> None:
+    clock = FakeClock()
+    storage = StorageEngine(clock=clock)
+    storage.reserve_seat("concert", "A-1", "user-1", 5)
+
+    clock.advance(5)
+
+    assert storage.seat_status("concert", "A-1") == SeatStatus(SEAT_AVAILABLE, None, -1)
+
+
+def test_join_queue_returns_position_and_prevents_duplicates() -> None:
+    storage = StorageEngine()
+
+    assert storage.join_queue("concert", "user-1") == (True, 1, 1)
+    assert storage.join_queue("concert", "user-2") == (True, 2, 2)
+    assert storage.join_queue("concert", "user-1") == (False, 1, 2)
+
+
+def test_queue_position_reports_position_and_queue_length() -> None:
+    storage = StorageEngine()
+    storage.join_queue("concert", "user-1")
+    storage.join_queue("concert", "user-2")
+
+    assert storage.queue_position("concert", "user-2") == (2, 2)
+    assert storage.queue_position("concert", "user-3") == (-1, 2)
+
+
+def test_pop_queue_is_fifo_and_returns_remaining_length() -> None:
+    storage = StorageEngine()
+    storage.join_queue("concert", "user-1")
+    storage.join_queue("concert", "user-2")
+
+    assert storage.pop_queue("concert") == ("user-1", 1)
+    assert storage.pop_queue("concert") == ("user-2", 0)
+    assert storage.pop_queue("concert") == (None, 0)
+
+
+def test_leave_queue_removes_user_and_reports_previous_position() -> None:
+    storage = StorageEngine()
+    storage.join_queue("concert", "user-1")
+    storage.join_queue("concert", "user-2")
+    storage.join_queue("concert", "user-3")
+
+    assert storage.leave_queue("concert", "user-2") == (True, 2, 2)
+    assert storage.queue_position("concert", "user-3") == (2, 2)
+    assert storage.leave_queue("concert", "missing") == (False, -1, 2)
+
+
+def test_peek_queue_returns_front_user_without_removing() -> None:
+    storage = StorageEngine()
+    storage.join_queue("concert", "user-1")
+    storage.join_queue("concert", "user-2")
+
+    assert storage.peek_queue("concert") == ("user-1", 2)
+    assert storage.queue_position("concert", "user-1") == (1, 2)
+    assert storage.peek_queue("empty-event") == (None, 0)
