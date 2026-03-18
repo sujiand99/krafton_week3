@@ -1,4 +1,4 @@
-"""Repository layer for ticketing DB service."""
+﻿"""Repository layer for ticketing DB service."""
 
 from __future__ import annotations
 
@@ -21,6 +21,22 @@ class TicketingRepository:
 
     def initialize(self) -> None:
         self._database.initialize()
+
+    def expire_stale_reservations(self, now: str) -> int:
+        with closing(self._database.connect()) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE reservations
+                SET status = 'EXPIRED',
+                    updated_at = ?
+                WHERE status = 'HELD'
+                  AND expires_at IS NOT NULL
+                  AND expires_at <= ?
+                """,
+                (now, now),
+            )
+            conn.commit()
+        return int(cursor.rowcount)
 
     def list_events(self) -> list[dict[str, object]]:
         with closing(self._database.connect()) as conn:
@@ -408,3 +424,5 @@ class TicketingRepository:
                 seat_rows,
             )
             conn.commit()
+
+
