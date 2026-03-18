@@ -137,10 +137,15 @@ def handle_client(
 
 
 class MiniRedisServer:
-    def __init__(self, host: str = HOST, port: int = PORT) -> None:
+    def __init__(
+        self,
+        host: str = HOST,
+        port: int = PORT,
+        storage: StorageEngine | None = None,
+    ) -> None:
         self._host = host
         self._port = port
-        self._storage = StorageEngine()
+        self._storage = storage or StorageEngine()
         self._shutdown_event = threading.Event()
         self._started_event = threading.Event()
         self._server_socket: socket.socket | None = None
