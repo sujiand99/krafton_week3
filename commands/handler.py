@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, TypeAlias
 
-from commands.registry import SUPPORTED_COMMANDS
-from protocol.resp_encoder import (
-    encode_bulk_string,
-    encode_error,
-    encode_integer,
-    encode_simple_string,
-)
+from commands.registry import COMMAND_ARITY, SUPPORTED_COMMANDS
+
+CommandResult: TypeAlias = str | int | None
+
+
+class CommandError(Exception):
+    """Base command-layer error."""
+
+
+class UnknownCommandError(CommandError):
+    """Raised when a command name is not supported."""
+
+
+class WrongNumberOfArgumentsError(CommandError):
+    """Raised when a command receives the wrong number of arguments."""
 
 
 class StorageProtocol(Protocol):
@@ -25,32 +33,38 @@ class StorageProtocol(Protocol):
     def expire(self, key: str, seconds: int) -> bool: ...
 
 
-def handle_command(command: list[str], storage: StorageProtocol) -> str:
-    """Dispatch a parsed command and return a RESP-encoded response string."""
-    if not command:
-        return encode_error("unknown command")
+def _validate_command(command: list[str]) -> tuple[str, list[str]]:
+    if not command or not command[0]:
+        raise CommandError("empty command")
 
     name = command[0].upper()
     if name not in SUPPORTED_COMMANDS:
-        return encode_error("unknown command")
+        raise UnknownCommandError(f"unknown command '{name}'")
+
+    expected_arity = COMMAND_ARITY[name]
+    if len(command) != expected_arity:
+        raise WrongNumberOfArgumentsError(
+            f"wrong number of arguments for '{name}' command"
+        )
+
+    return name, command[1:]
+
+
+def handle_command(command: list[str], storage: StorageProtocol) -> CommandResult:
+    """Dispatch a parsed command and return a pure command result."""
+    name, args = _validate_command(command)
 
     if name == "SET":
-        if len(command) != 3:
-            return encode_error("wrong number of arguments")
-
-        storage.set(command[1], command[2])
-        return encode_simple_string("OK")
+        key, value = args
+        storage.set(key, value)
+        return "OK"
 
     if name == "GET":
-        if len(command) != 2:
-            return encode_error("wrong number of arguments")
-
-        return encode_bulk_string(storage.get(command[1]))
+        key = args[0]
+        return storage.get(key)
 
     if name == "DEL":
-        if len(command) != 2:
-            return encode_error("wrong number of arguments")
+        key = args[0]
+        return 1 if storage.delete(key) else 0
 
-        return encode_integer(1 if storage.delete(command[1]) else 0)
-
-    return encode_error("unknown command")
+    raise UnknownCommandError(f"unknown command '{name}'")
