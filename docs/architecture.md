@@ -16,7 +16,8 @@ Mini Redis는 RESP 프로토콜을 이용해 `SET`, `GET`, `DEL`을 처리하는
 - `commands/`
   - 명령어 분기
   - storage 호출 연결
-  - 에러 응답 처리
+  - 명령 유효성 검증
+  - 에러 예외 전달
 - `storage/`
   - key-value 저장
   - 삭제 처리
@@ -47,18 +48,34 @@ expire(key: str, seconds: int) -> bool
 
 ### Command handler output
 
-```text
-+OK\r\n
-$3\r\n123\r\n
-$-1\r\n
-:1\r\n
--ERR unknown command\r\n
+```python
+"OK"
+"123"
+None
+1
+0
 ```
+
+- `SET key value` -> `"OK"`
+- `GET key` -> `str | None`
+- `DEL key` -> `1 | 0`
+- `PING`, `EXPIRE`는 현재 미지원
+
+### Command handler errors
+
+```python
+CommandError
+UnknownCommandError
+WrongNumberOfArgumentsError
+```
+
+Command layer는 RESP 에러 문자열을 직접 만들지 않습니다. 예외를 상위 계층으로 전달하고, 서버/프로토콜 계층이 이를 RESP 에러로 인코딩합니다.
 
 ## 1차 구현 순서
 
 1. 서버에서 raw 요청을 받습니다.
 2. RESP 요청을 배열 형태로 파싱합니다.
 3. Command handler가 storage와 연결됩니다.
-4. RESP 형태로 응답을 반환합니다.
-5. 단위 테스트와 통합 테스트를 작성합니다.
+4. Command handler는 순수 결과 또는 예외를 반환합니다.
+5. 서버/프로토콜 계층이 결과를 RESP로 인코딩합니다.
+6. 단위 테스트와 통합 테스트를 작성합니다.

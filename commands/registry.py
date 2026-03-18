@@ -4,5 +4,10 @@ SUPPORTED_COMMANDS = {
     "SET",
     "GET",
     "DEL",
-    "EXPIRE",
+}
+
+COMMAND_ARITY = {
+    "SET": 3,
+    "GET": 2,
+    "DEL": 2,
 }
