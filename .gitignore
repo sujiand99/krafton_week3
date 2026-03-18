@@ -9,3 +9,7 @@ htmlcov/
 venv/
 .idea/
 .vscode/
+
+*.sqlite3
+client/data/
+

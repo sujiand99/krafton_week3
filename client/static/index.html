@@ -1,0 +1,170 @@
+﻿<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mini Redis Ticketing Demo</title>
+    <link rel="stylesheet" href="/dashboard.css" />
+  </head>
+  <body>
+    <div class="stage-glow"></div>
+    <main class="app-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Mini Redis Demo Dashboard</p>
+          <h1>티켓 오픈 순간의 경쟁 제어</h1>
+          <p class="hero-text">
+            Redis는 좌석 홀드와 TTL 만료를 빠르게 처리하고, DB는 최종 예약의
+            진실을 유지합니다. 이 대시보드는 공연 좌석 1000개와 접속자 10000명을
+            가정한 발표용 시나리오를 그대로 재현합니다.
+          </p>
+        </div>
+        <div class="hero-roles">
+          <div class="role-card redis-role">
+            <span class="role-title">Redis</span>
+            <span class="role-body">좌석 홀드, TTL, 경쟁 제어, 빠른 상태 조회</span>
+          </div>
+          <div class="role-card db-role">
+            <span class="role-title">SQLite Mock DB</span>
+            <span class="role-body">최종 예약, 결제 성공, 영속 기록</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="summary-grid" id="summary-grid"></section>
+
+      <section class="panel-grid main-panels">
+        <section class="panel control-panel">
+          <div class="panel-header">
+            <h2>발표 조종판</h2>
+            <p>수동 조작과 자동 시나리오 재생을 섞어 발표 흐름을 그대로 따라갈 수 있습니다.</p>
+          </div>
+
+          <div class="control-form">
+            <label>
+              <span>사용자 ID</span>
+              <input id="user-id" type="text" value="user0001" />
+            </label>
+            <label>
+              <span>선택 좌석</span>
+              <input id="seat-id" type="text" value="S0001" />
+            </label>
+            <label>
+              <span>홀드 TTL(초)</span>
+              <input id="hold-seconds" type="number" min="1" value="10" />
+            </label>
+          </div>
+
+          <div class="action-row">
+            <button class="primary" id="reserve-btn">좌석 홀드</button>
+            <button class="secondary" id="confirm-btn">DB 확정</button>
+            <button class="secondary" id="release-btn">홀드 해제</button>
+          </div>
+
+          <div class="autoplay-card">
+            <h3>자동 시연</h3>
+            <p>발표 중 흔들리지 않게 핵심 장면만 순서대로 재생합니다.</p>
+            <div class="action-row autoplay-row">
+              <button class="accent" id="duel-demo-btn">2인 경합 자동 시연</button>
+              <button class="accent-alt" id="full-demo-btn">발표용 전체 시연</button>
+            </div>
+          </div>
+
+          <div class="surge-form">
+            <label>
+              <span>러시 사용자 수</span>
+              <input id="surge-users" type="number" min="1" value="10000" />
+            </label>
+            <label>
+              <span>핫좌석 수</span>
+              <input id="surge-seats" type="number" min="1" value="20" />
+            </label>
+          </div>
+
+          <div class="action-row">
+            <button class="accent" id="simulate-btn">커스텀 러시 실행</button>
+            <button class="accent-alt" id="preset-btn">10,000명 러시</button>
+          </div>
+
+          <div class="action-row single-row">
+            <button class="ghost" id="reset-btn">데모 초기화</button>
+          </div>
+
+          <div class="runbook-card">
+            <h3>발표 진행 순서</h3>
+            <ol id="runbook-list">
+              <li><strong>문제 제시</strong>: 좌석 1000개, 접속자 10000명 상황을 설명한다.</li>
+              <li><strong>수동 시연</strong>: S0001을 HELD로 만들고, 같은 좌석 중복 요청 실패를 보여준다.</li>
+              <li><strong>TTL 만료</strong>: 결제가 없으면 자동으로 AVAILABLE로 돌아가는 것을 보여준다.</li>
+              <li><strong>DB 확정</strong>: 결제 성공 후 CONFIRMED와 DB row 생성을 보여준다.</li>
+              <li><strong>러시 시뮬레이션</strong>: 10,000명 러시로 대량 경쟁 제어를 강조한다.</li>
+            </ol>
+          </div>
+
+          <div class="surge-card" id="surge-card"></div>
+
+          <div class="status-banner" id="status-banner">
+            서버와 데모 상태를 불러오는 중입니다.
+          </div>
+        </section>
+
+        <section class="panel seat-panel">
+          <div class="panel-header">
+            <h2>공연장 좌석 맵</h2>
+            <p>좌석을 작게 많이 배치해 실제 예매 시스템처럼 상태 변화를 색으로 읽을 수 있게 구성했습니다.</p>
+          </div>
+          <div class="seat-legend">
+            <span class="legend-item available">AVAILABLE</span>
+            <span class="legend-item held">HELD</span>
+            <span class="legend-item confirmed">CONFIRMED</span>
+            <span class="legend-item expired">EXPIRED/CANCELLED</span>
+          </div>
+          <div class="seat-focus" id="seat-focus"></div>
+          <div class="stage-banner">
+            <span>STAGE</span>
+          </div>
+          <div class="seat-sections" id="seat-grid"></div>
+        </section>
+      </section>
+
+      <section class="panel-grid lower-panels">
+        <section class="panel log-panel">
+          <div class="panel-header">
+            <h2>실시간 이벤트 로그</h2>
+            <p>Redis 경쟁 제어와 DB 확정 흐름을 시간순으로 보여줍니다.</p>
+          </div>
+          <div class="log-list" id="log-list"></div>
+        </section>
+
+        <section class="panel db-panel">
+          <div class="panel-header">
+            <h2>DB 최종 예약 패널</h2>
+            <p>최종 예약의 source of truth는 DB라는 점을 별도 패널로 분리해 보여줍니다.</p>
+          </div>
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>Reservation</th>
+                  <th>Seat</th>
+                  <th>User</th>
+                  <th>Status</th>
+                  <th>Confirmed</th>
+                </tr>
+              </thead>
+              <tbody id="reservation-table"></tbody>
+            </table>
+          </div>
+          <div class="contract-box">
+            <h3>발표 멘트 요약</h3>
+            <p id="contract-text">
+              Redis는 좌석 홀드와 TTL을, DB는 최종 예약 레코드를 담당합니다.
+            </p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/dashboard.js" defer></script>
+  </body>
+</html>
