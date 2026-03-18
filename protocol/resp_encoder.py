@@ -1,4 +1,4 @@
-﻿"""RESP response encoder helpers."""
+"""RESP response encoder helpers."""
 
 from __future__ import annotations
 
